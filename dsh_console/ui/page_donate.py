@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..screenfit import apply_screen_fit
+from .. import i18n
 from ..themes import Theme
 from .components import Card, ScrollPage
 
@@ -167,8 +168,9 @@ class _QrBox(QFrame):
         lay.setContentsMargins(14, 12, 14, 12)
         lay.setSpacing(9)
 
-        cap = QLabel(title)
+        cap = QLabel(i18n.tr(title))
         cap.setObjectName("QrTitle")
+        self.cap = cap            # 切语言时要改它
         cap.setAlignment(Qt.AlignCenter)
         lay.addWidget(cap)
 
@@ -188,7 +190,8 @@ class _QrBox(QFrame):
             self.setToolTip(f"点击放大{title}（方便手机扫码）")
         lay.addWidget(self.pic)
 
-        tip = QLabel("点击放大" if not self.pixmap.isNull() else "把图片放进上面这个目录即可显示")
+        tip = QLabel(i18n.tr("点击放大") if not self.pixmap.isNull()
+                     else "把图片放进上面这个目录即可显示")
         tip.setObjectName("QrTip")
         tip.setAlignment(Qt.AlignCenter)
         lay.addWidget(tip)
@@ -258,24 +261,26 @@ class DonatePage(ScrollPage):
         # （它头顶就是顶部功能区的下边线，再画一条就成了"一长一短两根线"）。
         thanks = Card()
         thanks.title_label.hide()        # 这块用大字，不要卡片标题
-        self.thanks_line = QLabel("❤️ 感谢你的捐赠，这是我不断打磨的动力")
+        self.thanks_line = QLabel(i18n.tr("❤️ 感谢你的捐赠，这是我不断打磨的动力"))
         self.thanks_line.setObjectName("DonateThanks")
         self.thanks_line.setWordWrap(True)
         thanks.body.addWidget(self.thanks_line)
 
-        sub = QLabel(
+        sub = QLabel(i18n.tr(
             "如果这个控制台帮到了你，欢迎请我喝杯咖啡 ☕ "
             "每一份支持我都会记在下面的名单里。"
-        )
+        ))
+        self.sub_line = sub
         sub.setObjectName("DonateSub")
         sub.setWordWrap(True)
         thanks.body.addWidget(sub)
 
         # 联系方式：捐赠页是"想支持我"的人落脚的地方，把怎么找到我写在这儿最合理。
         # 单独一行、字号小一档，不和感谢语抢视觉。
-        contact = QLabel(
+        contact = QLabel(i18n.tr(
             "📮 联系我：QQ 894597841 　·　 邮箱 894597841@163.com"
-        )
+        ))
+        self.contact_line = contact
         contact.setObjectName("DonateContact")
         contact.setWordWrap(True)
         contact.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -283,7 +288,8 @@ class DonatePage(ScrollPage):
         root.addWidget(thanks)
 
         # ---- 收款码（两张并排）
-        self.qr_card = Card("收款码", "微信 / 支付宝都可以。点一下图片放大，手机更容易扫上。")
+        self.qr_card = Card(i18n.tr("收款码"),
+                            i18n.tr("微信 / 支付宝都可以。点一下图片放大，手机更容易扫上。"))
         row = QHBoxLayout()
         row.setSpacing(16)
         self.box_wechat = _QrBox("微信收款码", WECHAT_IMAGE)
@@ -303,7 +309,7 @@ class DonatePage(ScrollPage):
         # 卡片右上角**不放按钮**：这一页是给访客看的，不是维护面板。
         # 名单改动由 activate() 兜住——每次切进这一页都会重读一次文件，
         # 所以改完 JSON 只要切走再切回来就是最新的，不需要「刷新」按钮。
-        self.donor_card = Card("感谢者名单", "读取中…")
+        self.donor_card = Card(i18n.tr("感谢者名单"), i18n.tr("读取中…"))
         self._donors_host = QWidget()
         self._donors_host.setObjectName("DonorList")
         self._donors_lay = QVBoxLayout(self._donors_host)
@@ -348,7 +354,7 @@ class DonatePage(ScrollPage):
         self.donors = donors
         where = f"{DIR_NAME}/{DONORS_FILE}"
         if not donors:
-            self.donor_card.hint_label.setText(f"还没有记录 · 数据来自 {where}")
+            self.donor_card.hint_label.setText(i18n.tr("还没有记录") + f" · {where}")
             # 空态只留一句话。**不在界面上写名单路径和 JSON 格式**：
             # 名单格式是给维护者看的，写在 README 和 donors.json 自己的
             # _说明 / _字段 / _示例 字段里就够了，摆在页面上是给访客看噪声。
@@ -367,6 +373,22 @@ class DonatePage(ScrollPage):
         lab.setTextInteractionFlags(Qt.TextSelectableByMouse)
         lab.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         return lab
+
+    def retranslate(self) -> None:
+        """按当前语言刷新本页文案（切语言时由 MainWindow 调用）。"""
+        self.thanks_line.setText(i18n.tr("❤️ 感谢你的捐赠，这是我不断打磨的动力"))
+        self.sub_line.setText(i18n.tr(
+            "如果这个控制台帮到了你，欢迎请我喝杯咖啡 ☕ "
+            "每一份支持我都会记在下面的名单里。"))
+        self.contact_line.setText(
+            i18n.tr("📮 联系我：QQ 894597841 　·　 邮箱 894597841@163.com"))
+        self.qr_card.set_title(i18n.tr("收款码"))
+        self.qr_card.hint_label.setText(
+            i18n.tr("微信 / 支付宝都可以。点一下图片放大，手机更容易扫上。"))
+        self.box_wechat.cap.setText(i18n.tr("微信收款码"))
+        self.box_alipay.cap.setText(i18n.tr("支付宝收款码"))
+        self.donor_card.set_title(i18n.tr("感谢者名单"))
+        self.reload()                      # 名单说明/空态文案也跟着换
 
     def apply_theme(self, theme: Theme) -> None:
         # 页面本身没有写死颜色：配色全在 themes.build_qss 里按 objectName 选，

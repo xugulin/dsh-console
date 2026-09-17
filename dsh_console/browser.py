@@ -40,6 +40,7 @@ import os
 import sys
 from pathlib import Path
 
+from . import i18n
 from . import browser_theme as bt
 from .screenfit import apply_screen_fit
 from . import config as console_config
@@ -282,6 +283,43 @@ def _waiting_page(note: str) -> str:
 </div></body></html>"""
 
 
+#: 右键菜单条目：``(中文标签, 动作 id, 是否可用)``。
+#:
+#: **为什么自己拼菜单**：Qt 自带的右键菜单文案来自 ``qtwebengine_<lang>.qm``，而实测
+#: 那份翻译里**根本没有这些条目**——把 qtwebengine_zh_CN.qm 装上，菜单照样全英文
+#: （文件里只有"下载/请求"那十几条）。所以想要中文菜单只有自己建这一条路。
+#: 标签走 :func:`i18n.tr`，于是它跟着界面的中/EN 开关一起切。
+def context_menu_items(*, editable: bool = False, has_selection: bool = False,
+                       link_url: str = "", media_is_image: bool = False,
+                       media_url: str = "") -> list[tuple[str, str, bool]]:
+    """按"点在哪儿"列出右键菜单条目。**纯函数**，不碰 Qt 控件。
+
+    QtWebEngine 在没有显示器的环境里一实例化就崩，所以"菜单里到底有什么"必须能在
+    不起引擎的情况下验证——这个函数就是为可测性单独拆出来的。
+    空标签 + 空 id 表示一条分隔线。
+    """
+    items: list[tuple[str, str, bool]] = [
+        ("后退", "back", True), ("前进", "forward", True), ("重新加载", "reload", True),
+    ]
+    if link_url:
+        items += [("", "", False),
+                  ("在新标签页中打开链接", "open_link_new_tab", True),
+                  ("复制链接地址", "copy_link", True)]
+    if media_is_image and media_url:
+        items += [("", "", False),
+                  ("复制图片", "copy_image", True),
+                  ("复制图片地址", "copy_image_address", True)]
+    if editable:
+        items += [("", "", False), ("剪切", "cut", has_selection),
+                  ("复制", "copy", has_selection), ("粘贴", "paste", True),
+                  ("全选", "select_all", True)]
+    elif has_selection:
+        items += [("", "", False), ("复制", "copy", True), ("全选", "select_all", True)]
+    items += [("", "", False), ("另存为…", "save_page", True), ("打印…", "print", True),
+              ("查看网页源代码", "view_source", True), ("检查元素", "inspect", True)]
+    return items
+
+
 def build_window(url: str | None, note: str = "", *, autostart: bool = False):
     """建出内置浏览器主窗口。返回 ``(窗口, 应用)``。
 
@@ -298,12 +336,95 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
 
     from . import gui as shell
 
+    class _BrowserView(QWebEngineView):
+        """带**中文右键菜单**的 WebEngine 视图。
+
+        Qt 自带的右键菜单在这里永远是英文（原因见 :func:`context_menu_items`），
+        所以自己拼一个：条目由纯函数给出，这里只负责翻译标签、按点击位置启用/禁用，
+        并把动作接到 page 的 WebAction 上。
+        """
+
+        def __init__(self, owner, parent=None) -> None:
+            super().__init__(parent)
+            self._owner = owner          # 浏览器主窗口（"在新标签页打开链接"要用它的 add_tab）
+
+        def _request(self):
+            page = self.page()
+            getter = getattr(page, "lastContextMenuRequest", None)
+            try:
+                return getter() if callable(getter) else None
+            except Exception:            # noqa: BLE001 - 拿不到就按"空白处点击"处理
+                return None
+
+        def build_menu(self):
+            """按当前语言与点击位置拼出菜单（返回 QMenu，调用方负责 exec/回收）。"""
+            page = self.page()
+            req = self._request()
+            editable = bool(getattr(req, "isContentEditable", lambda: False)())
+            selected = bool(getattr(req, "selectedText", lambda: "")())
+            link = getattr(req, "linkUrl", lambda: None)()
+            link_url = link.toString() if link is not None else ""
+            media = getattr(req, "mediaType", lambda: None)()
+            is_image = False
+            try:
+                is_image = media == page.ContextMenuRequest.MediaType.MediaTypeImage
+            except Exception:            # noqa: BLE001
+                is_image = bool(getattr(req, "mediaUrl", lambda: None)()
+                                and str(media).lower().endswith("image"))
+            murl = getattr(req, "mediaUrl", lambda: None)()
+            media_url = murl.toString() if murl is not None else ""
+
+            menu = QMenu(self)
+            action_map = {
+                "back": page.WebAction.Back, "forward": page.WebAction.Forward,
+                "reload": page.WebAction.Reload, "cut": page.WebAction.Cut,
+                "copy": page.WebAction.Copy, "paste": page.WebAction.Paste,
+                "select_all": page.WebAction.SelectAll, "save_page": page.WebAction.SavePage,
+                "view_source": page.WebAction.ViewSource,
+                "inspect": page.WebAction.InspectElement,
+            }
+            try:
+                action_map["print"] = page.WebAction.Print
+            except AttributeError:
+                pass
+            for label, act_id, enabled in context_menu_items(
+                    editable=editable, has_selection=selected, link_url=link_url,
+                    media_is_image=is_image, media_url=media_url):
+                if not label and not act_id:
+                    menu.addSeparator()
+                    continue
+                act = menu.addAction(i18n.tr(label))
+                act.setEnabled(enabled)
+                if act_id in action_map:
+                    wa = action_map[act_id]
+                    act.triggered.connect(lambda _c=False, a=wa: page.triggerAction(a))
+                elif act_id == "open_link_new_tab":
+                    act.triggered.connect(
+                        lambda _c=False, u=link_url: self._owner.add_tab(u))
+                elif act_id in ("copy_link", "copy_image_address"):
+                    text = link_url if act_id == "copy_link" else media_url
+                    act.triggered.connect(
+                        lambda _c=False, t=text: QApplication.clipboard().setText(t))
+                elif act_id == "copy_image":
+                    act.triggered.connect(
+                        lambda _c=False: page.triggerAction(page.WebAction.CopyImageToClipboard)
+                        if hasattr(page.WebAction, "CopyImageToClipboard") else None)
+            return menu
+
+        def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+            menu = self.build_menu()
+            try:
+                menu.exec(event.globalPos())
+            finally:
+                menu.deleteLater()
+            event.accept()
+
     class Browser(QMainWindow):
         """带标签页与地址栏的 harness 专用浏览器。"""
 
         def __init__(self) -> None:
             super().__init__()
-            self.setWindowTitle("DSH 内置浏览器")
+            self.setWindowTitle(i18n.tr("DSH 内置浏览器"))
             # 按屏幕自适应：小屏上别让窗口跑到屏幕外（和控制台主窗口同一套逻辑）
             apply_screen_fit(self, (1180, 800), (760, 520))
 
@@ -578,7 +699,7 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
 
         # ---------------------------------------------------------- 标签
         def add_tab(self, url: str | None = None):
-            view = QWebEngineView()
+            view = _BrowserView(self)          # 自定义右键菜单：Qt 默认那份是英文
             view.setPage(QWebEnginePage(self._profile, view))
             view.urlChanged.connect(lambda _u, v=view: self._on_url_changed(v))
             view.titleChanged.connect(lambda t, v=view: self._on_title(t, v))
@@ -734,7 +855,10 @@ def main(argv: list[str] | None = None) -> int:
     """内置浏览器入口。"""
     args = _parse(argv)
 
-    # **必须在建 QApplication 之前**：QtWebEngine 只在初始化时读这个变量
+    # **必须在建 QApplication 之前**：QtWebEngine 只在初始化时读这个变量。
+    # 先让 i18n 把 ``--lang=zh-CN``（或 en-US）追加进去——内置浏览器的界面语言
+    # 就是这么定的；用户手动给的 --extra-flags 排在它后面，仍然可以覆盖。
+    i18n.prepare_environment()
     flags = [f for f in (args.extra_flags or "").split(";") if f.strip()]
     apply_chromium_flags(flags)
 

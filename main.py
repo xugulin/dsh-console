@@ -211,9 +211,14 @@ def main(argv: list[str] | None = None) -> int:
 
     from PySide6.QtWidgets import QApplication
 
+    from dsh_console import i18n
     from dsh_console.ui.main_window import MainWindow
 
+    # ⚠️ 顺序要紧：语言环境必须在 QApplication **之前**定下来（Chromium 的 --lang
+    # 一旦引擎初始化就读不到了），翻译器则在 QApplication **之后**装。
+    i18n.prepare_environment()
     app = QApplication(sys.argv[:1])
+    _translators = i18n.install_translators(app)      # 必须保持引用，否则翻译失效
     app.setApplicationName("DSH 控制台")
     app.setApplicationDisplayName("DSH 控制台")
     app.setDesktopFileName("dsh-console")

@@ -435,7 +435,12 @@ def main(argv: list[str] | None = None) -> int:
 
     from PySide6.QtWidgets import QApplication as _QApp
 
+    # 与 main.py 一致：语言环境在 QApplication 之前，翻译器在之后
+    from . import i18n
+
+    i18n.prepare_environment()
     app = _QApp(sys.argv[:1])
+    _translators = i18n.install_translators(app)      # 保持引用
     app.setApplicationName("DSH Web 界面")
     app.setApplicationDisplayName("DSH · Web 界面")
     app.setDesktopFileName("dsh-console")

@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import __version__, service, themes
+from .. import __version__, i18n, service, themes
 from ..themes import Theme
 from ..workers import run_async
 from .components import Card, ScrollPage
@@ -84,6 +84,7 @@ class SettingsPage(ScrollPage):
     """设置与关于。"""
 
     theme_requested = Signal(str)
+    language_requested = Signal(str)      # "zh_CN" / "en_US"，由 MainWindow 统一应用
 
     def __init__(self, theme: Theme, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -104,8 +105,37 @@ class SettingsPage(ScrollPage):
         root.setSpacing(16)
 
 
+        # ---- 界面语言（放在**主题前面**：先定语言，再看外观）
+        #
+        # 按钮文字用语言自己的名字（「简体中文」/「English (US)」），**不随界面语言翻译**——
+        # 这是通行做法：找不到自己母语的人，至少能认出自己那一行字。
+        self.lang_card = Card(i18n.tr("界面语言"),
+                              i18n.tr("同时作用于控制台界面、内置浏览器（含右键菜单）与网页界面；"
+                                      "切换后立即生效。"))
+        lang_row = QHBoxLayout()
+        lang_row.setSpacing(8)
+        self._lang_buttons: list[tuple[str, QPushButton]] = []
+        for key, name in i18n.LANGUAGES:
+            b = QPushButton(name)
+            b.setObjectName("Segment")
+            b.setCheckable(True)
+            b.setChecked(key == i18n.current())
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _checked=False, k=key: self.language_requested.emit(k))
+            lang_row.addWidget(b)
+            self._lang_buttons.append((key, b))
+        lang_row.addStretch(1)
+        self.lang_card.body.addLayout(lang_row)
+        self.lang_note = QLabel("")
+        self.lang_note.setWordWrap(True)
+        self.lang_note.setObjectName("CardHint")
+        self.lang_card.body.addWidget(self.lang_note)
+        root.addWidget(self.lang_card)
+
         # ---- 主题
-        theme_card = Card("外观主题", "选择后立即生效。深色主题共 4 套，浅色 3 套。")
+        self.theme_card = Card(i18n.tr("外观主题"),
+                               i18n.tr("选择后立即生效。深色主题共 4 套，浅色 3 套。"))
+        theme_card = self.theme_card
         grid = QGridLayout()
         grid.setSpacing(10)
         for i, t in enumerate(themes.THEMES):
@@ -117,8 +147,10 @@ class SettingsPage(ScrollPage):
         root.addWidget(theme_card)
 
         # ---- 插件（列表已移到独立的「插件」页，这里只留摘要）
-        self.plugin_card = Card("已安装插件", "完整管理（安装 / 卸载 / 更新 / 启用停用 / 体检）见左侧「插件」页")
-        self.plugin_summary = QLabel("读取中…")
+        self.plugin_card = Card(
+            i18n.tr("已安装插件"),
+            i18n.tr("完整管理（安装 / 卸载 / 更新 / 启用停用 / 体检）见左侧「插件」页"))
+        self.plugin_summary = QLabel(i18n.tr("读取中…"))
         self.plugin_summary.setWordWrap(True)
         self.plugin_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.plugin_summary.setStyleSheet(
@@ -128,7 +160,8 @@ class SettingsPage(ScrollPage):
         root.addWidget(self.plugin_card)
 
         # ---- 关于
-        about = Card("关于")
+        self.about_card = Card(i18n.tr("关于"))
+        about = self.about_card
         info = QLabel(
             f"<b>DSH 控制台</b> v{__version__}<br>"
             f"Python + PySide6 桌面控制台，用于管理 DSH Harness。<br><br>"
@@ -143,6 +176,7 @@ class SettingsPage(ScrollPage):
         about.body.addWidget(info)
         root.addWidget(about)
         root.addStretch(1)
+        self._update_lang_note()
 
     def load_plugins(self) -> None:
         from .. import plugin_manager
@@ -151,7 +185,7 @@ class SettingsPage(ScrollPage):
 
     def _on_plugins(self, plugins: list) -> None:
         if not plugins:
-            self.plugin_summary.setText("（没有已安装的插件）")
+            self.plugin_summary.setText(i18n.tr("（没有已安装的插件）"))
             return
         active = sum(1 for p in plugins if p.is_effective)
         disabled = sum(1 for p in plugins if p.in_bundles and p.disabled)
@@ -160,6 +194,42 @@ class SettingsPage(ScrollPage):
             parts.append(f"{disabled} 个已停用")
         names = "、".join(p.name for p in plugins)
         self.plugin_summary.setText("　·　".join(parts) + f"\n{names}")
+
+    def set_active_language(self, key: str) -> None:
+        for lang_key, btn in self._lang_buttons:
+            btn.setChecked(lang_key == key)
+
+    def reload_language(self) -> None:
+        """切语言后由 MainWindow 调用：刷新语言按钮状态与提示语。"""
+        self.set_active_language(i18n.current())
+        self._update_lang_note()
+
+    def _update_lang_note(self) -> None:
+        """提示"哪些立刻生效、哪些要重开"——这是实测最容易困惑的一点。"""
+        if i18n.current() == i18n.LANG_EN:
+            text = ("Console and standard dialogs switched immediately. "
+                    "The built-in browser takes the new language when you open it next "
+                    "(its Chromium locale is read at process start).")
+        else:
+            text = ("控制台与标准对话框已立即切换。内置浏览器在**下次打开**时套用新语言"
+                    "（Chromium 的语言在进程启动时读取）。")
+        self.lang_note.setText(text)
+
+    def retranslate(self) -> None:
+        """按当前语言刷新本页文案（不重建控件，避免丢掉状态）。"""
+        self.lang_card.set_title(i18n.tr("界面语言"))
+        self.lang_card.hint_label.setText(
+            i18n.tr("同时作用于控制台界面、内置浏览器（含右键菜单）与网页界面；切换后立即生效。"))
+        self.theme_card.set_title(i18n.tr("外观主题"))
+        self.theme_card.hint_label.setText(
+            i18n.tr("选择后立即生效。深色主题共 4 套，浅色 3 套。"))
+        self.plugin_card.set_title(i18n.tr("已安装插件"))
+        self.plugin_card.hint_label.setText(
+            i18n.tr("完整管理（安装 / 卸载 / 更新 / 启用停用 / 体检）见左侧「插件」页"))
+        self.about_card.set_title(i18n.tr("关于"))
+        if self.plugin_summary.text() in ("读取中…", "Loading…"):
+            self.plugin_summary.setText(i18n.tr("读取中…"))
+        self._update_lang_note()
 
     def set_active_theme(self, key: str) -> None:
         for sw in self._swatches:

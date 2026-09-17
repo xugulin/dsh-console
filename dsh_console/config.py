@@ -15,6 +15,9 @@ from pathlib import Path
 #: 配置文件位置。**不要**在别处再拼一遍这个路径。
 CONFIG_PATH = Path.home() / ".config" / "dsh-console" / "config.json"
 
+#: 界面语言（i18n.LANG_ZH / LANG_EN）。没设过 = 简体中文。
+KEY_LANGUAGE = "language"
+
 #: 控制台自身的发布地址（检查/应用更新用）。留空表示没配。
 KEY_UPDATE_URL = "consoleUpdateUrl"
 

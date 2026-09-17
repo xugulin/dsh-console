@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..screenfit import apply_screen_fit
-from .. import config, harness, service, themes
+from .. import config, harness, i18n, service, themes
 from ..workers import run_async
 from .components import apply_screen_fit
 from .page_billing import BillingPage
@@ -94,7 +94,7 @@ class MainWindow(QMainWindow):
         cfg = _load_config()
         self.theme = themes.get_theme(cfg.get("theme", themes.DEFAULT_THEME))
         self._last_status: service.ServiceStatus | None = None
-        self.setWindowTitle("DSH 控制台")
+        self.setWindowTitle(i18n.tr("DSH 控制台"))
         # 按屏幕算尺寸（小屏上自适应，别让右下角跑到屏幕外）
         apply_screen_fit(self, (1180, 800), (940, 640))
         self._build()
@@ -178,7 +178,7 @@ class MainWindow(QMainWindow):
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         for key, label in self.NAV:
-            btn = QPushButton(label)
+            btn = QPushButton(i18n.tr(label))      # 语言可切换：见 retranslate()
             btn.setObjectName("NavButton")
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
@@ -198,11 +198,11 @@ class MainWindow(QMainWindow):
         self.btn_harness.setObjectName("VersionButton")
         self.btn_harness.setCheckable(True)
         self.btn_harness.setCursor(Qt.PointingHandCursor)
-        self.btn_harness.setToolTip("harness 版本、安装位置、运行状态与升级")
+        self.btn_harness.setToolTip(i18n.tr("harness 版本、安装位置、运行状态与升级"))
         self.nav_group.addButton(self.btn_harness)
         sv.addWidget(self.btn_harness)
 
-        self.side_status = QLabel("状态：读取中…")
+        self.side_status = QLabel(i18n.tr("状态：读取中…"))
         self.side_status.setObjectName("SidebarFooter")
         self.side_status.setWordWrap(True)
         sv.addWidget(self.side_status)
@@ -226,7 +226,7 @@ class MainWindow(QMainWindow):
         tb = QHBoxLayout(topbar)
         tb.setContentsMargins(18, 0, 18, 0)
         tb.setSpacing(10)
-        self.top_title = QLabel("控制台")
+        self.top_title = QLabel(i18n.tr("控制台"))
         self.top_title.setObjectName("TopBarTitle")
         tb.addWidget(self.top_title)
         tb.addStretch(1)
@@ -285,6 +285,7 @@ class MainWindow(QMainWindow):
         self.nav_group.buttons()[0].setChecked(True)
 
         self.page_settings.theme_requested.connect(self.apply_theme)
+        self.page_settings.language_requested.connect(self.apply_language)
         # 只激活首屏；其余页面在第一次切过去时才加载（启动时零网络/零子进程）
         self._activate(0)
 
@@ -303,7 +304,8 @@ class MainWindow(QMainWindow):
 
     def _goto(self, index: int) -> None:
         if hasattr(self, "top_title"):
-            self.top_title.setText(self.NAV[index][1] if index < len(self.NAV) else "Harness")
+            self.top_title.setText(i18n.tr(self.NAV[index][1]) if index < len(self.NAV)
+                                    else i18n.tr("Harness"))
         """切页：先让旧页 deactivate（停轮询），再让新页 activate（首次才拉数据）。"""
         prev = self.stack.currentIndex()
         if prev == index:
@@ -413,6 +415,51 @@ class MainWindow(QMainWindow):
             + (f"<br>{st.uptime_text}" if st.is_running else "")
         )
         self.side_status.setTextFormat(Qt.RichText)
+
+    # ------------------------------------------------------------ 语言
+    def apply_language(self, key: str, persist: bool = True) -> None:
+        """切换界面语言（控制台 + 内置浏览器 + 网页界面）。
+
+        能立刻生效的：控制台自己的文案（重新查表 + 刷新控件）、Qt 自己的文案
+        （换一套 ``.qm`` 翻译器，标准对话框/菜单立刻变）。
+
+        **不能立刻生效的**：内置浏览器与网页界面的语言来自 Chromium 的 ``--lang``，
+        那个开关只在**进程启动时**读一次。这里把环境变量改成新的（下次开浏览器就对了），
+        当前已开着的内置浏览器要**重开**才换语言——所以提示里写明了。
+        """
+        i18n.set_current(key)
+        if persist:
+            cfg = _load_config()
+            cfg[config.KEY_LANGUAGE] = key
+            _save_config(cfg)
+        # 让下次拉起的浏览器/前端进程带上新的 --lang；同时更新 QLocale
+        i18n.prepare_environment()
+        # 换 Qt 翻译器：先摘掉旧的，再装新的（引用必须留着）
+        app = QApplication.instance()
+        if app is not None:
+            for old_tr in getattr(self, "_qt_translators", []):
+                app.removeTranslator(old_tr)
+            self._qt_translators = i18n.install_translators(app)
+        self.retranslate()
+        # 主题色卡那类"重建才换语言"的页面，交给它自己刷新
+        reload_page = getattr(self.page_settings, "reload_language", None)
+        if callable(reload_page):
+            reload_page()
+
+    def retranslate(self) -> None:
+        """按当前语言刷新窗口自身与各页面的文案。"""
+        self.setWindowTitle(i18n.tr("DSH 控制台"))
+        # nav_group.buttons() 里最后一个是版本按钮，NAV 只有 10 项，zip 正好跳过它
+        for btn, (_key, label) in zip(self.nav_group.buttons(), self.NAV):
+            btn.setText(i18n.tr(label))
+        self.btn_harness.setToolTip(i18n.tr("harness 版本、安装位置、运行状态与升级"))
+        idx = self.stack.currentIndex()
+        self.top_title.setText(i18n.tr(self.NAV[idx][1]) if idx < len(self.NAV)
+                               else i18n.tr("Harness"))
+        for page in self.pages:
+            fn = getattr(page, "retranslate", None)
+            if callable(fn):
+                fn()
 
     def apply_theme(self, key: str, persist: bool = True) -> None:
         self.theme = themes.get_theme(key)

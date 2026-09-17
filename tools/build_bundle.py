@@ -89,8 +89,20 @@ STDLIB_SKIP = {
 
 #: Qt 里不拷的目录。控制台用 QtCore/QtGui/QtWidgets + QtWebEngineWidgets，
 #: 翻译/QML/设计器/3D 这些都用不到——实测能省掉 100 MB 量级。
+#: translations/ 里**必须留下**的文件：Qt 自己的界面文案（标准对话框、按钮）与
+#: **内置浏览器的右键菜单**都在 qm 里。此前把整个 translations/ 删掉，代价就是
+#: 内置浏览器右键菜单永远是英文（实测反馈）。只留这两种 × 两种语言，约 160 KB。
+#: 只留**内置的那两种语言**的 Qt 翻译：qtbase/qtwebengine × zh_CN/en。
+#: 全语言的 qtbase_*.qm 加起来 7 MB 出头，而我们只需要两套。
+QT_TRANSLATIONS_KEEP = ("qtbase_zh_CN", "qtbase_en", "qtwebengine_zh_CN", "qtwebengine_en")
+#: Chromium 自己的语言包目录（``translations/qtwebengine_locales/``）。它决定
+#: ``navigator.language`` 与网页里 Chromium 画的那些界面文字。整目录 44 MB（所有语言），
+#: 我们只需要中文和英文这两份（各约 0.5 MB）。
+QT_LOCALES_KEEP = ("zh-CN.pak", "en-US.pak", "en-GB.pak")
+
 QT_PRUNE = {
-    "translations", "qml", "metatypes", "bin",
+    # ⚠️ "translations" **不能**整目录删——见上面 QT_TRANSLATIONS_KEEP。
+    "qml", "metatypes", "bin",
     # ⚠️ libexec **不能整目录删**：QtWebEngineProcess 就在里面，删了 GUI 版一开窗就
     # 崩（报 "could not find QtWebEngineProcess"）。只删 qml 那几个工具。
 }
@@ -238,13 +250,49 @@ def build_linux_python(dst: Path) -> None:
     # 还得来回拷 37 MB。留着这段注释是为了别有人再想加回去（见 dereference_symlinks）。
 
     # Qt 裁剪
+    #
+    # ⚠️ 两平台的 wheel 布局不一样：Linux 的 Qt 内容在 ``PySide6/Qt/`` 下，
+    # 而 Windows wheel 直接把 Qt 内容放在 ``PySide6/`` 里（**没有 Qt/ 这一层**）。
+    # 只认 Linux 那套路径的话，Windows 侧整块裁剪会被跳过——实测漏掉过
+    # 60 MB 的 translations（304 个 .qm + 53 个 pak 原样进包）。
     qt = site / "PySide6" / "Qt"
+    if not qt.is_dir() and (site / "PySide6").is_dir():
+        qt = site / "PySide6"
+        log("Qt 布局：Windows wheel（Qt 内容直接在 PySide6/ 下）")
     if qt.is_dir():
         for name in sorted(QT_PRUNE):
             target = qt / name
             if target.is_dir():
                 shutil.rmtree(target)
                 log(f"裁剪 Qt/{name}")
+        # translations/：只留需要的几个 .qm（整目录 59 MB，留下的是 ~160 KB）
+        # ⚠️ 两平台布局不同：Linux 是 PySide6/Qt/translations，Windows wheel 是
+        # PySide6/translations（**没有 Qt/ 这一层**）。只按 Linux 的路径裁，Windows 侧
+        # 会整目录 60 MB 原样进包（实测踩过）。两处都试。
+        tr_dir = qt / "translations"
+        if not tr_dir.is_dir() and (qt.parent / "translations").is_dir():
+            tr_dir = qt.parent / "translations"
+        if tr_dir.is_dir():
+            removed = 0
+            for f in list(tr_dir.iterdir()):
+                if f.is_file() and not f.name.startswith(QT_TRANSLATIONS_KEEP):
+                    f.unlink()
+                    removed += 1
+            kept = sorted(f.name for f in tr_dir.iterdir() if f.is_file())
+            log(f"裁剪 Qt/translations：删 {removed} 个，留 {len(kept)} 个 "
+                f"({', '.join(kept) if len(kept) <= 6 else '…'})")
+            if not kept:
+                log("  ⚠️ 一个翻译文件都没留——Qt 标准对话框会是英文")
+            # Chromium 的语言包：只留中英两份（整目录 44 MB）
+            locales = tr_dir / "qtwebengine_locales"
+            if locales.is_dir():
+                loc_removed = 0
+                for f in list(locales.iterdir()):
+                    if f.is_file() and f.name not in QT_LOCALES_KEEP:
+                        f.unlink()
+                        loc_removed += 1
+                kept_loc = sorted(f.name for f in locales.iterdir() if f.is_file())
+                log(f"裁剪 qtwebengine_locales：删 {loc_removed} 个，留 {kept_loc}")
         plugins = qt / "plugins"
         if plugins.is_dir():
             for child in list(plugins.iterdir()):
