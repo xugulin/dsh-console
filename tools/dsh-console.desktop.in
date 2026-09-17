@@ -1,0 +1,28 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=DSH Console
+Name[zh_CN]=DSH 控制台
+GenericName=Harness Console
+GenericName[zh_CN]=Harness 控制台
+Comment=Start, stop and restart the DSH Harness; view models, pricing and billing
+Comment[zh_CN]=启停重启 DSH Harness，查看模型价格与账单
+# ============================================================================
+# 这是**模板**，不是能直接用的启动器。Exec / Icon 里的 @HERE@ 是占位符，由
+# tools/install-desktop.sh 替换成"本份代码"的实际路径，然后写出两个文件：
+#
+#   <项目>/dsh-console.desktop                  ← 在项目目录里双击用的
+#   ~/.local/share/applications/dsh-console.desktop   ← 启动器/Super 键搜到的
+#
+# 跑一次就行：  ./tools/install-desktop.sh
+#
+# 为什么不在这里写死绝对路径：项目一旦被复制或改名，写死的路径还指着**旧目录**，
+# 点图标启动的是另一份代码——排查起来极难（踩过：改了 A 目录，图标启动的却是 B），
+# 而且把开发机的用户名连同目录结构一起发布出去。
+# ============================================================================
+Exec=@HERE@/run.sh
+Icon=@HERE@/assets/icon.png
+Terminal=false
+StartupNotify=true
+Categories=Development;
+Keywords=dsh;harness;console;deepseek;billing;pricing;控制台;账单;

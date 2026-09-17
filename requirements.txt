@@ -1,0 +1,21 @@
+# DSH 控制台的运行时依赖。
+#
+# 核心只需要 PySide6 的 Essentials 子集（QtCore / QtGui / QtWidgets），
+# 比完整 PySide6 小得多（76 MB vs ~500 MB），本机网络慢时这个差别很关键。
+#
+# 其余功能都走标准库：
+#   * 读会话文件用 compression.zstd（Python 3.14 起进标准库）→ 因此要求 Python >= 3.14
+#   * HTTP 用 urllib.request
+#   * 解析 credentials.yaml 用手写的极简解析（避免引入 PyYAML）
+#   * TUI 版（dsh_console.tui）用 curses，不引入任何依赖
+PySide6-Essentials>=6.11.2
+
+# GUI 版（dsh_console.gui）把 harness 自己的 web UI 装进原生窗口，用的是 QtWebEngine
+# ——它只在 Addons 里（约 200 MB）。本机已装，所以不放进默认清单，免得为了控制台
+# 多下几百兆。要不要装取决于你用不用 GUI 版：
+#
+#     uv pip install PySide6-Addons>=6.11.2
+#
+# 没装也不会崩：GUI 版会明确告诉你缺什么，并给出不依赖它的退路
+# （`run.sh --gui --native`，走 ACP 的原生聊天窗口）。
+

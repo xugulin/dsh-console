@@ -1,0 +1,13 @@
+LIBRARY kernel32.dll
+EXPORTS
+    CloseHandle
+    CreateDirectoryW
+    CreateProcessW
+    ExitProcess
+    GetCommandLineW
+    GetEnvironmentVariableW
+    GetExitCodeProcess
+    GetLastError
+    GetModuleFileNameW
+    SetEnvironmentVariableW
+    WaitForSingleObject

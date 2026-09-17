@@ -1,0 +1,11 @@
+{
+  "_note": "Thank-you list. Add one entry per donation to the donors array, save, then switch away from the Donate page and back (no restart needed). Chinese users: keys 名字 / 金额 / 日期 / 留言 and a plain [\"张三\"] name array are also accepted.",
+  "_fields": "name (required) / amount / date / message (optional)",
+  "_example": {
+    "name": "Alice",
+    "amount": "¥50",
+    "date": "2025-09-17",
+    "message": "Great tool, thanks!"
+  },
+  "donors": []
+}
