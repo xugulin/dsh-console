@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import subproc
 from .. import (browser, config, frontends, harness, plugin_manager, service, portable,
                 service, updater)
 from ..themes import Theme
@@ -60,7 +61,7 @@ def _run_browser_update() -> tuple[bool, str]:
     """
     cmd = browser.update_command()
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        proc = subproc.run(cmd, capture_output=True, text=True, timeout=3600)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"{type(exc).__name__}: {exc}"
     if proc.returncode != 0:
@@ -620,6 +621,7 @@ class HarnessPage(ScrollPage):
         card.body.addWidget(self.console_hint)
         root.addWidget(card)
 
+        self._remote_version = ""          # 「检查更新」查到的远端版本号
         self.btn_set_url.clicked.connect(self._set_update_url)
         self.btn_check_console.clicked.connect(self._check_console_update)
         self.btn_update_console.clicked.connect(self._apply_console_update)
@@ -629,8 +631,12 @@ class HarnessPage(ScrollPage):
         if not portable.enabled():
             return
         self.m_console_ver.set_value(updater.current_version() or "—")
-        url = config.get(config.KEY_UPDATE_URL)
-        self.m_console_url.set_value(_short_url(url) if url else "（未设置）")
+        # 显示**实际生效**的地址：用户没配就用内置的 GitHub 默认地址（见 updater.check_url）
+        cfg = updater.configured_url()
+        effective = updater.check_url()
+        self.m_console_url.set_value(
+            _short_url(effective) + ("" if cfg else "（默认）")
+        )
 
     def _set_update_url(self) -> None:
         from PySide6.QtWidgets import QInputDialog
@@ -638,7 +644,7 @@ class HarnessPage(ScrollPage):
         current = config.get(config.KEY_UPDATE_URL)
         text, ok = QInputDialog.getText(
             self, "控制台发布地址",
-            "填一个 zip 或 json 地址（留空表示不启用检查）：",
+            "填 zip 或 json 地址；留空 = 用内置的 GitHub 发布地址：",
             text=current,
         )
         if not ok:
@@ -657,10 +663,7 @@ class HarnessPage(ScrollPage):
         self.console_hint.setText(text)
 
     def _check_console_update(self) -> None:
-        url = config.get(config.KEY_UPDATE_URL)
-        if not url:
-            self._set_console_hint("先点「设置发布地址…」填一个地址。", error=True)
-            return
+        url = updater.check_url()      # 没配就用内置的 GitHub 默认地址
         self.btn_check_console.setEnabled(False)
         self._set_console_hint("正在检查…")
 
@@ -668,7 +671,8 @@ class HarnessPage(ScrollPage):
             self.btn_check_console.setEnabled(True)
             version, note = result
             mine = updater.current_version()
-            if version and version != mine:
+            if updater.is_newer(version, mine):
+                self._remote_version = version      # 记住它：应用更新时要拼 Release 地址
                 self._set_console_hint(
                     f"{note}；当前 {mine or '?'} —— <b>可以更新</b>，点「更新控制台」。", ok=True
                 )
@@ -682,10 +686,10 @@ class HarnessPage(ScrollPage):
         run_async(lambda: updater.check(url), done, fail)
 
     def _apply_console_update(self) -> None:
-        url = config.get(config.KEY_UPDATE_URL)
-        if not url:
-            self._set_console_hint("先设置发布地址。", error=True)
+        if not self._remote_version:
+            self._set_console_hint("先点「检查更新」，拿到新版本号之后再更新。", error=True)
             return
+        url = updater.package_url(self._remote_version)
         ans = QMessageBox.question(
             self, "确认更新控制台",
             f"将从<br><code>{url}</code><br>下载新包并替换 <b>app/</b> 与 <b>tools/</b>。<br><br>"

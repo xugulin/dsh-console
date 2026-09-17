@@ -39,6 +39,84 @@ from pathlib import Path
 
 from . import portable
 
+#: 发布渠道：控制台自己的 GitHub 仓库。项目发布到 GitHub 之后，「检查更新」不该再
+#: 要求用户手填地址——默认就用这里的 ``version.json``（几十字节，检查很快）；真要更新时，
+#: 再按版本号拼出对应 Release 里的便携包地址。
+GITHUB_REPO = "xugulin/dsh-console"
+#: 默认的版本信息地址：仓库根目录的 version.json，走 raw 域名，永远指向最新提交。
+DEFAULT_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/version.json"
+#: 便携包在 Release 里的命名规则（和 tools/build_bundle.py 产出的名字保持一致）。
+ASSET_TEMPLATE = "DSH-Console-{version}-{platform}.zip"
+
+
+def platform_tag() -> str:
+    """这个包属于哪个平台——与资产命名里的那个词一模一样。"""
+    import sys
+
+    return "Windows" if sys.platform.startswith("win") else "Linux"
+
+
+def release_asset_url(version: str) -> str:
+    """某个版本的便携包在 Release 里的下载地址。"""
+    return (f"https://github.com/{GITHUB_REPO}/releases/download/v{version}/"
+            f"{ASSET_TEMPLATE.format(version=version, platform=platform_tag())}")
+
+
+def version_key(v: str) -> tuple:
+    """把版本号拆成可比较的元组：``1.0.1`` → ``((0,1),(0,0),(0,1))``。
+
+    为什么要它：原来判断"能不能更新"用的是 ``version != mine`` 这种**字符串不等**，
+    于是发布页上只要不是同一个字符串就会提示"可以更新"——包括**降级**（远端 1.0、
+    本地 1.0.1 也会说要更新）。版本号比较必须按数字比。
+    非数字段（如 ``1.0.1-rc.1``）退化为字符串比较，够用且不会抛异常。
+    """
+    import re
+
+    out: list[tuple[int, object]] = []
+    for part in re.split(r"[.\-+_]", (v or "").strip()):
+        if part.isdigit():
+            out.append((0, int(part)))
+        elif part:
+            out.append((1, part))
+    return tuple(out)
+
+
+def is_newer(remote: str, mine: str) -> bool:
+    """远端版本是否**比本地新**（同版本或更旧都返回 False）。"""
+    if not remote:
+        return False
+    if not mine:
+        return True
+    return version_key(remote) > version_key(mine)
+
+
+def configured_url() -> str:
+    """用户在「设置发布地址…」里填的地址（没填就是空串）。"""
+    from . import config
+
+    return (config.get(config.KEY_UPDATE_URL) or "").strip()
+
+
+def check_url() -> str:
+    """**检查更新**用哪个地址：用户配了就用配的，没配就用默认的 version.json。
+
+    这样便携包一装好就能直接检查更新，不需要用户先知道"发布地址"是什么。
+    """
+    return configured_url() or DEFAULT_VERSION_URL
+
+
+def package_url(version: str) -> str:
+    """**应用更新**时下载哪个包。
+
+    用户把地址配成了 zip 就照他的用；否则（默认情况，或他配的是 json）
+    按"已查到的新版本号"拼出 Release 里的资产地址。
+    """
+    cfg = configured_url()
+    if cfg.lower().endswith(".zip"):
+        return cfg
+    return release_asset_url(version)
+
+
 #: 更新时允许被替换的顶层条目（其余一律不碰）。
 REPLACEABLE = ("app", "tools")
 #: 更新时一并刷新的顶层文件（启动器与说明——它们通常也随版本调整）。

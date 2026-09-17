@@ -37,6 +37,8 @@ WIN = "Start-DSH-Console.bat"
 WIN_TUI = "Start-DSH-Terminal.bat"
 WIN_WEB = "Start-DSH-Web-UI.bat"
 WIN_SHORTCUT = "Create-Desktop-Shortcut.bat"
+#: 带控制台的图形启动器：**专门用来排查**（无窗口版看不到启动报错）
+WIN_DEBUG = "Start-DSH-Console-Debug.bat"
 DESKTOP = "dsh-console.desktop"
 README = "README-Portable.md"
 
@@ -100,9 +102,10 @@ set -eu
 exec "$PY" "$HERE/app/main.py"{args} "$@"
 """
 
-WIN_TMPL = """@echo off
-rem {title} - portable launcher, everything lives in this folder.
-setlocal
+#: 两个 Windows 启动器模板**共用**的环境设置：把 HOME 关进包里、补齐 Windows 标准用户
+#: 目录、定位包内的 python。抽出来是因为两个模板只有"怎么起"不同，环境必须一字不差——
+#: 复制两份迟早改漏一处（踩过：只给一个模板加了 chcp）。
+WIN_ENV = """setlocal
 rem 这个 .bat 是 **GBK(cp936)** 编码的（见本模块开头）。中文 Windows 默认就是 936，
 rem 但英文版 Windows 默认 437/1252，不显式切一下的话下面的中文提示全是乱码。
 rem 命令本身全是 ASCII，所以哪怕 chcp 失败（系统没装 936）也只是提示难看，不影响启动。
@@ -145,7 +148,12 @@ rem 原因很实际：Windows 上下载重名文件会生成「DSH-Console (1)�
 rem 路径里的 ) 会把括号块提前"闭合"，后面的 echo 就跑到块外面去了，行为完全错乱。
 rem 单行 if + goto 没有这个问题。
 if not exist "%PY%" goto :missing
+"""
 
+#: **带控制台**的启动器：终端界面必须用这个（TUI 就是终端程序），排查问题时也用它。
+WIN_TMPL = """@echo off
+rem {title} - portable launcher, everything lives in this folder.
+{env}
 "%PY%" "%HERE%\\app\\main.py"{args} %*
 set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" goto :failed
@@ -170,6 +178,34 @@ rem 被 .vbs 隐藏启动时不要 pause：那时没有窗口，等一个看不�
 rem 隐藏的 cmd 进程赖着不走（由 .vbs 设 DSH_NO_PAUSE=1 告知）
 if not "%DSH_NO_PAUSE%"=="1" pause
 exit /b %RC%
+"""
+
+#: **不留控制台窗口**的启动器（图形界面 / 网页界面用）。
+#:
+#: 为什么要单独一个模板：原来的 .bat 在前台跑 python.exe，而图形界面是常驻的，
+#: 那个控制台窗口就会**一直挂在那里**（实测反馈："后台终端窗口持续存在影响体验"）。
+#: 这里改两步：
+#:   1. 用 `pythonw.exe`（GUI 子系统，**天生没有控制台**）而不是 python.exe；
+#:   2. 用 `start ""` 起它并**立刻返回**，于是 .bat 自己的那个黑框也马上关闭。
+#: 代价是启动阶段的报错看不见了——要排查就用 `Start-DSH-Console-Debug.bat` / `.exe`。
+WIN_SILENT_TMPL = """@echo off
+rem {title} - portable launcher (no console window)
+{env}
+set "PYW=%HERE%\\runtime\\win\\python\\pythonw.exe"
+if not exist "%PYW%" set "PYW=%PY%"
+start "" "%PYW%" "%HERE%\\app\\main.py"{args} %*
+exit /b 0
+
+:missing
+echo.
+echo 便携包不完整：这里没有运行时的 python.exe
+echo 请先双击「Install-Windows-Runtime.bat」，它会把 node / Python / PySide6 装进本文件夹。
+echo.
+echo 期望位置：
+echo   %PY%
+echo.
+pause
+exit /b 1
 """
 
 WIN_VBS = (
@@ -213,22 +249,111 @@ echo "已安装：$APPS/dsh-console-portable.desktop"
 echo "Super 键唤出启动器，搜索「DSH 控制台」即可。"
 """
 
+#: 创建桌面快捷方式的入口 .bat。
+#:
+#: 为什么写得这么啰嗦：PowerShell 可能被组策略/安全软件拦下；`powershell` 可能不在 PATH
+#: （只装了 PowerShell 7 的机器上叫 `pwsh`）；脚本文件可能带着"从网上下载"的锁定。
+#: 每一种失败都要**说清楚**并**给一条能走通的路**，而不是窗口一闪就没了——实测反馈
+#: 正是"无法运行"，而用户看不到任何原因。
+WIN_SHORTCUT_BAT = r"""@echo off
+chcp 936 >nul 2>nul
+setlocal
+set "HERE=%~dp0"
+if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
+echo 正在创建桌面快捷方式…
+echo.
+
+if not exist "%HERE%\Create-Desktop-Shortcut.ps1" goto :nops
+
+rem 优先用系统自带的 Windows PowerShell；只有 PS7 的机器上它叫 pwsh
+set "PS=powershell"
+where powershell >nul 2>nul
+if errorlevel 1 set "PS=pwsh"
+where %PS% >nul 2>nul
+if errorlevel 1 goto :nops
+
+rem 先解除"从网上下载"的锁定，否则脚本可能被策略直接拦下
+%PS% -NoProfile -ExecutionPolicy Bypass -Command "try { Unblock-File -LiteralPath '%HERE%\Create-Desktop-Shortcut.ps1' -ErrorAction SilentlyContinue } catch { }" >nul 2>nul
+
+%PS% -NoProfile -ExecutionPolicy Bypass -File "%HERE%\Create-Desktop-Shortcut.ps1"
+if not errorlevel 1 goto :done
+
+echo.
+echo [提示] PowerShell 没能创建快捷方式，改用兜底方案（把启动器直接放到桌面）…
+goto :fallback
+
+:nops
+echo [提示] 这台机器上没有可用的 PowerShell，改用兜底方案…
+goto :fallback
+
+:fallback
+copy /y "%HERE%\Start-DSH-Console.bat" "%USERPROFILE%\Desktop\DSH 控制台.bat" >nul 2>nul
+if errorlevel 1 goto :fallback_fail
+echo   已在桌面放好「DSH 控制台.bat」，双击即可启动。
+echo   想要带图标的快捷方式，手动做一步：右键 Start-DSH-Console.exe → 发送到 → 桌面快捷方式
+goto :done
+
+:fallback_fail
+echo   [失败] 桌面目录写不进去（可能被 OneDrive 重定向或权限限制）。
+echo   手动做法：右键 Start-DSH-Console.exe → 发送到 → 桌面快捷方式
+goto :done
+
+:done
+echo.
+pause
+exit /b 0
+"""
+
 WIN_SHORTCUT_PS = r"""
 # 在 Windows 上创建带图标的桌面快捷方式。
+#
 # 用 PowerShell 的 WScript.Shell：.lnk 的二进制格式自己拼太脆，交给系统最稳。
+# 每一步都带错误提示——用户双击 .bat 后若只看到窗口一闪而过，是没法排查的。
 $ErrorActionPreference = 'Stop'
 $HERE = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+
+# 目标优先用原生 .exe（双击不留黑框、起不来还会弹原生对话框说明原因），没有才退回 .bat
+$target = Join-Path $HERE 'Start-DSH-Console.exe'
+if (-not (Test-Path -LiteralPath $target)) { $target = Join-Path $HERE 'Start-DSH-Console.bat' }
+if (-not (Test-Path -LiteralPath $target)) {
+    Write-Host '[错误] 这个文件夹里找不到 Start-DSH-Console.exe / Start-DSH-Console.bat' -ForegroundColor Red
+    Write-Host "       当前目录：$HERE" -ForegroundColor Red
+    exit 1
+}
+
 $desktop = [Environment]::GetFolderPath('Desktop')
+if (-not $desktop -or -not (Test-Path -LiteralPath $desktop)) {
+    Write-Host '[错误] 取不到桌面目录（可能被组策略或 OneDrive 重定向限制）。' -ForegroundColor Red
+    exit 1
+}
 $lnk = Join-Path $desktop 'DSH 控制台.lnk'
-$shell = New-Object -ComObject WScript.Shell
-$sc = $shell.CreateShortcut($lnk)
-$sc.TargetPath = Join-Path $HERE 'Start-DSH-Console.bat'
-$sc.WorkingDirectory = $HERE
-$icon = Join-Path $HERE '图标\icon.ico'
-if (Test-Path $icon) { $sc.IconLocation = $icon }
-$sc.Description = 'DSH 控制台（便携版）'
-$sc.Save()
-Write-Host "已Create-Desktop-Shortcut：$lnk"
+
+# ⚠️ 图标在 icons\ 下（**不是**中文的 图标\）。目录名英文化时这里漏改过一次，
+#    于是快捷方式永远拿不到图标。改目录名要全仓库搜一遍旧名字。
+$icon = Join-Path $HERE 'icons\icon.ico'
+
+try {
+    $shell = New-Object -ComObject WScript.Shell
+    $sc = $shell.CreateShortcut($lnk)
+    $sc.TargetPath = $target
+    $sc.WorkingDirectory = $HERE
+    if (Test-Path -LiteralPath $icon) { $sc.IconLocation = $icon }
+    $sc.Description = 'DSH 控制台（便携版）'
+    $sc.Save()
+} catch {
+    Write-Host "[错误] 创建快捷方式失败：$($_.Exception.Message)" -ForegroundColor Red
+    Write-Host '       可能是系统禁用了 Windows Script Host（安全软件/组策略）。' -ForegroundColor Red
+    Write-Host '       手动做法：右键 Start-DSH-Console.exe → 发送到 → 桌面快捷方式' -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "已创建桌面快捷方式：$lnk" -ForegroundColor Green
+Write-Host "  目标：$target"
+if (Test-Path -LiteralPath $icon) { Write-Host '  图标：icons\icon.ico' }
+else { Write-Host '  图标：（包内没有 icons\icon.ico，暂用系统默认图标）' -ForegroundColor Yellow }
+Write-Host ''
+Write-Host '提示：快捷方式指向包内文件，移动整个文件夹后需要重新运行本脚本。'
+exit 0
 """
 
 
@@ -277,7 +402,10 @@ def _windows_launcher(dst: Path, name: str, title: str, args: list[str],
     这里会直接抛错而不是悄悄写坏——写坏了在 Windows 上就是一屏乱码，很难倒查。
     """
     arg_text = (" " + " ".join(args)) if args else ""
-    _write(dst / name, WIN_TMPL.format(title=title, args=arg_text),
+    # silent=True  → **无窗口**模板（pythonw + start，本窗口立刻退出）
+    # silent=False → 带控制台模板（TUI 必须有终端；Debug 版要能看报错）
+    tmpl = WIN_SILENT_TMPL if silent else WIN_TMPL
+    _write(dst / name, tmpl.format(title=title, args=arg_text, env=WIN_ENV),
            newline="\r\n", encoding="gbk")
     # 无终端的那个用**主名字**（用户会去双击的就是它），带终端的 .bat 留着排错。
     # TUI 不生成隐藏版：**隐藏的终端等于没有 TUI**，那个文件只会让人困惑。
@@ -457,19 +585,18 @@ def write_launchers(dst: Path, *, node_version: str, py_version: str,
                executable=True)
 
     if "win" in platforms:
-        _windows_launcher(dst, WIN, "启动 DSH 控制台（图形界面）", ARGS["console"], silent=True)
+        _windows_launcher(dst, WIN, "启动 DSH 控制台（图形界面，不留黑框）",
+                          ARGS["console"], silent=True)
+        # 带控制台的同胞兄弟：不留黑框的那几个**看不到启动报错**，出问题看这个
+        _windows_launcher(dst, WIN_DEBUG, "启动 DSH 控制台（带控制台，排查用）",
+                          ARGS["console"], silent=False)
         # TUI 例外：它本身就是终端程序，藏掉终端就没得用了
         _windows_launcher(dst, WIN_TUI, "启动 DSH 终端界面（TUI）", ARGS["tui"], silent=False)
         _windows_launcher(dst, WIN_WEB, "启动 DSH 网页界面（浏览器）", ARGS["web"], silent=True)
 
     # .bat/.vbs 一律 CRLF + GBK，.ps1 一律 CRLF + 带 BOM 的 UTF-8（理由见 _write）
     if "win" in platforms:
-        _write(dst / WIN_SHORTCUT,
-               "@echo off\n"
-               "rem 在桌面创建带图标的快捷方式\n"
-               'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Create-Desktop-Shortcut.ps1"\n'
-               "pause\n",
-               newline="\r\n", encoding="gbk")
+        _write(dst / WIN_SHORTCUT, WIN_SHORTCUT_BAT, newline="\r\n", encoding="gbk")
         _write(dst / "Create-Desktop-Shortcut.ps1", WIN_SHORTCUT_PS,
                newline="\r\n", encoding="utf-8", bom=True)
         _write(dst / WIN_BOOTSTRAP_NAME, WIN_BOOTSTRAP_PS,
@@ -534,19 +661,18 @@ def _readme(dst: Path, node_version: str, py_version: str, windows_ready: bool,
 
     _win_howto = """### Windows 10 / 11
 
-**推荐双击 `.exe`**（原生启动器，双击不会闪黑框，也不需要脚本宿主）：
+| 双击 | 会不会出现终端窗口 | 用途 |
+|---|---|---|
+| **`Start-DSH-Console.exe`** | **不会** | 图形控制台（推荐） |
+| **`Start-DSH-Web-UI.exe`** | **不会** | 起 harness 并用浏览器打开界面 |
+| `Start-DSH-Console.bat` | **不会** | 同上，`.exe` 被杀软拦下时的退路 |
+| `Start-DSH-Console-Silent.vbs` | **不会** | 同上，第三种走法 |
+| `Start-DSH-Console-Debug.exe` / `.bat` | 会（**故意保留**） | 出问题时用：报错能看见 |
+| `Start-DSH-Terminal.exe` / `.bat` | 会（**必须有**） | 终端界面 TUI，本身就是终端程序 |
 
-| 双击 | 启动什么 |
-|---|---|
-| `Start-DSH-Console.exe` | 图形控制台（无控制台窗口） |
-| `Start-DSH-Web-UI.exe` | 起 harness 并用浏览器打开界面 |
-| `Start-DSH-Terminal.exe` | 终端界面（TUI，自带终端窗口） |
-| `Start-DSH-Console-Debug.exe` | **出问题时用这个**：带控制台窗口的图形控制台，报错能看见 |
-
-`.vbs`（`Start-DSH-Console-Silent.vbs`）与 `.bat` 仍然保留：`.vbs` 效果和 `.exe` 一样；
-`.bat` 会显示终端，适合排查。终端界面也可以用 `Start-DSH-Terminal.bat`。
-
-想要桌面图标：双击 `Create-Desktop-Shortcut.bat`。
+想要桌面图标：双击 **`Create-Desktop-Shortcut.bat`**。
+走 PowerShell 创建带图标的 `.lnk`；万一 PowerShell 被策略拦住或机器上没有，
+它会**自动兜底**把启动器放到桌面上，并把原因打印出来（窗口不会一闪而过）。
 """ if "win" in platforms else ""
 
     return f"""# DSH Console · Portable

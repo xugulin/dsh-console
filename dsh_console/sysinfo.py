@@ -13,10 +13,11 @@ import os
 import platform
 import shutil
 import socket
-import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from . import subproc
 
 
 import ctypes
@@ -634,7 +635,7 @@ def dsh_service_memory() -> str:
     if _is_windows:
         return _win_service_memory()
     try:
-        proc = subprocess.run(
+        proc = subproc.run(
             ["systemctl", "--user", "show", "dsh-web", "-p", "MemoryCurrent", "--value"],
             capture_output=True, text=True, timeout=8, check=False,
         )
@@ -662,7 +663,7 @@ def _win_service_memory() -> str:
     if not pid:
         return "—"
     try:
-        proc = subprocess.run(
+        proc = subproc.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, timeout=10, check=False,
         )

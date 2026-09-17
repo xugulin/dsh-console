@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from . import subproc
+
 from . import portable
 
 UNIT = "dsh-web"
@@ -200,7 +202,7 @@ def format_duration(seconds: int) -> str:
 def _run(args: list[str], timeout: int = _TIMEOUT) -> subprocess.CompletedProcess[str]:
     """跑一条子进程命令，永不抛 FileNotFoundError。"""
     try:
-        return subprocess.run(
+        return subproc.run(
             args,
             capture_output=True,
             text=True,
@@ -515,7 +517,7 @@ def pid_alive(pid: int) -> bool:
         return False
     if os.name == "nt":
         try:
-            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            out = subproc.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
                                  capture_output=True, text=True, timeout=15)
         except (OSError, subprocess.SubprocessError):
             return False
@@ -661,7 +663,7 @@ def _portable_start(*, port: int | None = None) -> None:
             extra["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             extra["start_new_session"] = True
-        proc = subprocess.Popen(
+        proc = subproc.popen(
             argv, cwd=str(portable.root()), env=env,
             stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
             **extra,
@@ -704,7 +706,7 @@ def _portable_stop(timeout: float = 15.0) -> None:
         if pid_alive(pid):
             try:
                 if os.name == "nt":
-                    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                    subproc.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                                    capture_output=True, timeout=20)
                 else:
                     os.kill(pid, signal.SIGKILL)

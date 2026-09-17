@@ -31,6 +31,8 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(_ROOT))
 
+from dsh_console import subproc  # noqa: E402
+
 #: 运行时下限。改这里要同步改 requirements.txt、tools/find-python.sh 和 README。
 MIN_PYTHON = (3, 14)
 MIN_PYTHON_TEXT = "3.14"
@@ -84,7 +86,7 @@ def _interpreter_problem(exe: str, need_gui: bool) -> str | None:
     if need_gui:
         code += "import PySide6\n"
     try:
-        proc = subprocess.run(
+        proc = subproc.run(
             [exe, "-c", code], capture_output=True, timeout=60, check=False
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -486,6 +488,33 @@ def _self_test() -> int:
     from dsh_console import billing, market, plugin_manager, pricing, service, themes
 
     problems = 0        # 本段自己累计；不能借用函数后面才定义的同名变量
+
+    print("== 界面层导入检查 ==")
+    # ⚠️ 这一项是补上的，代价很实在：`dsh_console/ui/page_harness.py` 里一行
+    # `from . import subproc`（应为 `from ..`）写错了导入层级，而**自检当时全绿**——
+    # 因为自检压根不导入界面层。结果是：`--self-test`、`--list-themes` 都正常，
+    # 用户一双击图形界面就 ImportError 退出（Windows 上还没有控制台，什么都看不到）。
+    # 所以这里把界面层逐个导入一遍，让"能不能起来"这件事在自检里就有答案。
+    import importlib
+    import pkgutil
+
+    import dsh_console.ui as _ui
+
+    ui_bad: list[str] = []
+    for mod in pkgutil.iter_modules(_ui.__path__):
+        name = f"dsh_console.ui.{mod.name}"
+        try:
+            importlib.import_module(name)
+        except Exception as exc:  # noqa: BLE001 - 自检要把任何异常都当问题报出来
+            ui_bad.append(f"{name}: {type(exc).__name__}: {exc}")
+    if ui_bad:
+        for line in ui_bad:
+            print(f"  ✗ {line}")
+        print(f"  ✗ 界面层有 {len(ui_bad)} 个模块导入失败——图形界面起不来")
+        problems += 1
+    else:
+        count = len(list(pkgutil.iter_modules(_ui.__path__)))
+        print(f"  ✓ 界面层 {count} 个模块全部导入正常")
 
     print("== 名字静态检查 ==")
     # 这个坑踩过三次（`_ThemeDialog`、`apply_screen_fit` ×2）：名字写在函数体里、

@@ -42,6 +42,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import subproc
 from . import portable
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -251,6 +252,10 @@ def launch_tui(
         # Windows 上没有 TERMINALS 那张表（全是 Linux 终端模拟器），
         # 用 cmd 的 start 新开一个控制台窗口跑 TUI。
         # `start` 的第一个参数会被当成窗口标题，所以必须占位，否则含空格的路径会被吃掉。
+        #
+        # ⚠️ **这一处故意不用 subproc.popen**：TUI 本身就是终端程序，这里要的正是
+        # `start` 新开出来的那个控制台窗口。若带上 CREATE_NO_WINDOW，就成了"起了一个
+        # 看不见的 TUI"，等于没起。除此之外**所有** spawn 都走 dsh_console.subproc。
         try:
             proc = subprocess.Popen(
                 ["cmd", "/c", "start", "DSH 终端界面", *argv],
@@ -271,7 +276,7 @@ def launch_tui(
         return LaunchResult(False, hint, manual_command=manual)
     term_argv, env, how = picked
     try:
-        proc = subprocess.Popen(
+        proc = subproc.popen(
             term_argv, env=env, cwd=cwd, start_new_session=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
@@ -329,7 +334,7 @@ def launch_browser(
             out = log
         except OSError:
             out = subprocess.DEVNULL
-        proc = subprocess.Popen(
+        proc = subproc.popen(
             argv, env=_child_env(), cwd=cwd, start_new_session=True,
             stdout=out, stderr=subprocess.STDOUT,
         )
@@ -376,7 +381,7 @@ def launch_gui(
             out = log
         except OSError:
             out = subprocess.DEVNULL
-        proc = subprocess.Popen(
+        proc = subproc.popen(
             argv, env=_child_env(), cwd=cwd, start_new_session=True,
             stdout=out, stderr=subprocess.STDOUT,
         )

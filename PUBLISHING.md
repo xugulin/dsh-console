@@ -174,8 +174,15 @@ Windows 版新增了原生 `.exe` 启动器（源码 `tools/win_launcher/dsh_lau
 
 发布时打 **`v1.0`** 标签，资产命名为 `DSH-Console-1.0-Linux.zip`、`DSH-Console-1.0-Windows.zip`。
 
-**让"可以更新"真正生效**：控制台自我更新地址读 `config.json` 的 `consoleUpdateUrl`，
-指向 release 资产即可：
+**"检查更新"已经默认可用**：便携包里的「检查控制台更新」在用户没配任何地址时，
+会去读仓库根目录的 `version.json`（`updater.DEFAULT_VERSION_URL`），拿到新版本号后
+按 `DSH-Console-<版本>-<平台>.zip` 拼出 Release 资产地址去下载。
+所以**每次发版必须做两件事**：
+1. 改 `dsh_console/__init__.py` 的 `__version__`，并同步仓库根的 `version.json`（版本/标签/资产）；
+2. 打完包后建 `vX.Y.Z` 的 Release，把两个 zip 按 `DSH-Console-X.Y.Z-{Linux,Windows}.zip` 传上去。
+
+想改用别的发布地址（比如自建镜像），在 `config.json` 里配 `consoleUpdateUrl` 即可——
+它优先于内置默认值：填 `.zip` 地址就下它，填 `.json` 地址就只用来检查版本。
 
 ```json
 { "consoleUpdateUrl": "https://github.com/xugulin/dsh-console/releases/latest/download/DSH-Console-1.0-Linux.zip" }

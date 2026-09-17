@@ -31,6 +31,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import subproc
+
 PROFILE = Path.home() / ".dsh" / "profiles" / "web"
 PACKAGE_JSON = PROFILE / "package.json"
 PATCH_FILE = PROFILE / "cordis.patch.yml"
@@ -210,7 +212,7 @@ def validate_profile(timeout: int = 180) -> tuple[bool, str]:
     这是写入 patch 后的**安全网**：组合失败说明 YAML 写坏了。
     """
     try:
-        proc = subprocess.run(
+        proc = subproc.run(
             ["dsh", "--profile", "web", "--dump-config"],
             capture_output=True,
             text=True,
@@ -278,7 +280,7 @@ def set_enabled(plugin: InstalledPlugin, enabled: bool) -> str:
 def _dsh_plugin(*args: str) -> str:
     cmd = ["dsh", "plugin", "--profile", "web", *args]
     try:
-        proc = subprocess.run(
+        proc = subproc.run(
             cmd, capture_output=True, text=True, timeout=_TIMEOUT, check=False
         )
     except FileNotFoundError as exc:

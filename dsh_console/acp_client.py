@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from . import subproc
 from . import portable
 
 #: profile 名。ACP 服务器由 ``dsh --profile acp`` 拉起。
@@ -181,7 +182,7 @@ class AcpClient:
         if os.name == "nt" and str(self.dsh_bin).lower().endswith((".cmd", ".bat")):
             base = ["cmd", "/c", str(self.dsh_bin)]
         try:
-            self.proc = subprocess.Popen(
+            self.proc = subproc.popen(
                 [*base, "--profile", self.profile],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,

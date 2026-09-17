@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import subproc
 from . import config as console_config
 from . import portable
 
@@ -112,7 +113,7 @@ class Releases:
 # --------------------------------------------------------------------- 工具
 def _run(argv: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(
+        return subproc.run(
             argv, capture_output=True, text=True, timeout=timeout, check=False
         )
     except FileNotFoundError as exc:
@@ -586,7 +587,7 @@ def _run_stream(cmd: list[str], *, timeout: int, on_line) -> subprocess.Complete
     stderr 合并进 stdout：npm 的进度和警告都在 stderr 上。
     """
     try:
-        proc = subprocess.Popen(
+        proc = subproc.popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
         )
