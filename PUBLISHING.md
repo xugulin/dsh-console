@@ -100,7 +100,7 @@ cost-tracking  plugin-manager  skills  ai-tools  linux  windows
 cd /path/to/dsh-console
 git init -b main
 git add .
-git commit -m "feat: DSH Console v1.0 — portable PySide6 console for DSH (DeepSeek Harness)"
+git commit -m "feat: DSH Console v1.1 — portable PySide6 console for DSH (DeepSeek Harness)"
 git remote add origin git@github.com:xugulin/dsh-console.git
 git push -u origin main
 ```
@@ -172,7 +172,7 @@ Windows 版新增了原生 `.exe` 启动器（源码 `tools/win_launcher/dsh_lau
 | Linux | `dist/DSH-Console-Linux.zip` | 308.8 MB |
 | Windows | `dist/DSH-Console-Windows.zip` | 353.6 MB |
 
-发布时打 **`v1.0`** 标签，资产命名为 `DSH-Console-1.0-Linux.zip`、`DSH-Console-1.0-Windows.zip`。
+发布时打 **`v1.0`** 标签，资产命名为 `DSH-Console-1.1-Linux.zip`、`DSH-Console-1.1-Windows.zip`。
 
 **"检查更新"已经默认可用**：便携包里的「检查控制台更新」在用户没配任何地址时，
 会去读仓库根目录的 `version.json`（`updater.DEFAULT_VERSION_URL`），拿到新版本号后
@@ -201,7 +201,7 @@ Windows 版新增了原生 `.exe` 启动器（源码 `tools/win_launcher/dsh_lau
 
 | 项目 | 数值 | 出处 |
 |---|---|---|
-| 控制台版本 | **1.0** | `dsh_console/__init__.py` |
+| 控制台版本 | **1.1** | `dsh_console/__init__.py` |
 | Python 要求 | ≥ 3.14（`compression.zstd` 进标准库） | `requirements.txt` |
 | 依赖 | 仅 `PySide6-Essentials >= 6.11.2` | `requirements.txt` |
 | 便携包大小 | Linux 308 MB / Windows 见 `dist/` | 实测 |
