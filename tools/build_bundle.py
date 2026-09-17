@@ -100,6 +100,35 @@ QT_TRANSLATIONS_KEEP = ("qtbase_zh_CN", "qtbase_en", "qtwebengine_zh_CN", "qtweb
 #: 我们只需要中文和英文这两份（各约 0.5 MB）。
 QT_LOCALES_KEEP = ("zh-CN.pak", "en-US.pak", "en-GB.pak")
 
+#: 打包时**整个跳过**的重家伙：LibreOffice 运行时（Windows 包约 330 MB）。
+#:
+#: 它是 ``@deepseek-ai/dsh`` 的**传递依赖**（不在 dsh 的 dependencies 里），只被文档预览
+#: 插件用来把 Office 文档转成预览图。三件事让它值得砍：
+#:   1. Linux 包**本来就没有**它（上游没发 Linux 版）——说明功能是可选降级的；
+#:   2. v1.0~v1.1 发布的 Windows 包也没有它（353 MB），用户没反馈过问题；
+#:   3. 它一占就是 330 MB，把 Windows 包从 350 MB 撑到 470 MB。
+#: 想要完整预览功能：``DSH_BUNDLE_KEEP_LIBREOFFICE=1`` 构建即可。
+SKIP_HEAVY_PACKAGES = ("libreoffice-kit",)
+
+
+def prune_heavy_packages(root: Path) -> int:
+    """删掉 :data:`SKIP_HEAVY_PACKAGES` 里那些"整包跳过"的依赖，返回释放的字节数。"""
+    import os
+
+    if os.environ.get("DSH_BUNDLE_KEEP_LIBREOFFICE"):
+        log("保留 LibreOffice 运行时（DSH_BUNDLE_KEEP_LIBREOFFICE=1）")
+        return 0
+    freed = 0
+    for pattern in SKIP_HEAVY_PACKAGES:
+        for path in sorted(root.rglob(f"@deepseek-ai/{pattern}*")):
+            if not path.is_dir():
+                continue
+            size = du(path)
+            shutil.rmtree(path, ignore_errors=True)
+            freed += size
+            log(f"跳过重包 {path.name}：-{human(size)}")
+    return freed
+
 QT_PRUNE = {
     # ⚠️ "translations" **不能**整目录删——见上面 QT_TRANSLATIONS_KEEP。
     "qml", "metatypes", "bin",
@@ -266,21 +295,22 @@ def build_linux_python(dst: Path) -> None:
                 shutil.rmtree(target)
                 log(f"裁剪 Qt/{name}")
         # translations/：只留需要的几个 .qm（整目录 59 MB，留下的是 ~160 KB）
-        # ⚠️ 两平台布局不同：Linux 是 PySide6/Qt/translations，Windows wheel 是
-        # PySide6/translations（**没有 Qt/ 这一层**）。只按 Linux 的路径裁，Windows 侧
-        # 会整目录 60 MB 原样进包（实测踩过）。两处都试。
-        tr_dir = qt / "translations"
-        if not tr_dir.is_dir() and (qt.parent / "translations").is_dir():
-            tr_dir = qt.parent / "translations"
-        if tr_dir.is_dir():
+        # ⚠️ 两平台布局不同，而且 Windows wheel 上**两个位置同时存在**：
+        #   Linux：PySide6/Qt/translations
+        #   Windows：PySide6/Qt/translations（少量）+ PySide6/translations（60 MB 全量）
+        # 早先只裁其中一处（还想当然地写成 if/else），结果 Windows 侧那 60 MB 原样进包。
+        # 现在两处都裁。
+        for tr_dir in (qt / "translations", qt.parent / "translations"):
+            if not tr_dir.is_dir():
+                continue
             removed = 0
             for f in list(tr_dir.iterdir()):
                 if f.is_file() and not f.name.startswith(QT_TRANSLATIONS_KEEP):
                     f.unlink()
                     removed += 1
             kept = sorted(f.name for f in tr_dir.iterdir() if f.is_file())
-            log(f"裁剪 Qt/translations：删 {removed} 个，留 {len(kept)} 个 "
-                f"({', '.join(kept) if len(kept) <= 6 else '…'})")
+            log(f"裁剪 {tr_dir.name}（{tr_dir.parent.name}）：删 {removed} 个，留 "
+                f"{len(kept)} 个 ({', '.join(kept) if len(kept) <= 6 else '…'})")
             if not kept:
                 log("  ⚠️ 一个翻译文件都没留——Qt 标准对话框会是英文")
             # Chromium 的语言包：只留中英两份（整目录 44 MB）
@@ -824,6 +854,7 @@ def build(out: Path, *, platforms: tuple[str, ...] = ("linux", "win"),
     build_app(dst)
     build_harness(dst, version=_dsh_version(), node_version=node_version,
                   platforms=platforms)
+    prune_heavy_packages(dst)
     build_profile(dst)
     build_home_skeleton(dst, platforms)
     build_icons(dst)

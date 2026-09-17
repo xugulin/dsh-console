@@ -377,6 +377,9 @@ class MainWindow(QMainWindow):
 
     def _activate(self, index: int) -> None:
         page = self.pages[index]
+        # 页面可能是**第一次显示**才建控件（懒加载），所以这里也翻一遍。
+        # 幂等：每次都从存的原文重算，查不到的词原样保留中文。
+        i18n.translate_widgets(page)
         start = getattr(page, "activate", None)
         if callable(start):
             start()
@@ -389,6 +392,10 @@ class MainWindow(QMainWindow):
                 return
 
     def _poll_status(self) -> None:
+        # 页面会异步刷新（状态轮询、磁盘列表、会话统计…），刷新时把标签**重新写回中文**，
+        # 而语言切换只发生一次——所以这里每次轮询补翻一遍。只在英文模式下做，避免白白遍历。
+        if i18n.current() != i18n.LANG_ZH:
+            i18n.translate_widgets(self)
         from ..workers import run_async
 
         def done(st: service.ServiceStatus) -> None:
@@ -460,6 +467,9 @@ class MainWindow(QMainWindow):
             fn = getattr(page, "retranslate", None)
             if callable(fn):
                 fn()
+        # 最后整棵控件树走一遍：17 个页面里只有少数几个写了 retranslate()，
+        # 其余页面的文案靠这次遍历覆盖（查不到的词原样保留中文）。
+        i18n.translate_widgets(self)
 
     def apply_theme(self, key: str, persist: bool = True) -> None:
         self.theme = themes.get_theme(key)
