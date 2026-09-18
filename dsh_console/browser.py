@@ -400,6 +400,8 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
         def __init__(self, profile, parent, on_menu_click) -> None:
             super().__init__(profile, parent)
             self._on_menu_click = on_menu_click
+            self._on_menu_request = lambda _info: None    # 由 view 覆盖
+            self._on_menu_closed = lambda: None           # 由 view 覆盖
 
         def javaScriptConsoleMessage(self, level, message, line, source):  # noqa: N802
             """页面用 console.log 把两件事报上来（唯一的回传通道，见 _CTX_JS 的说明）：
@@ -416,6 +418,9 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
                 except Exception as exc:                 # noqa: BLE001
                     print(f"[html-menu] 右键请求失败：{type(exc).__name__}: {exc}",
                           file=sys.stderr, flush=True)
+                return
+            if text == "dsh-menu-closed":
+                self._on_menu_closed()
                 return
             if text.startswith("dsh-menu:"):
                 try:
@@ -438,6 +443,7 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             super().__init__(parent)
             self._owner = owner          # 浏览器主窗口（"在新标签页打开链接"要用它的 add_tab）
             self._ctx: dict = {}          # 本次右键位置的上下文（选中/链接/图片）
+            self._menu_open = False       # 页面里是否正开着菜单（用于"再点一次关闭"）
 
         def _request(self):
             page = self.page()
@@ -597,7 +603,7 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
           d.style.left = left + 'px';
           d.style.top = top + 'px';
           function close() {
-            if (d.parentNode) { d.remove(); }
+            if (d.parentNode) { d.remove(); console.log('dsh-menu-closed'); }
             document.removeEventListener('mousedown', onDown, true);
             document.removeEventListener('keydown', onKey, true);
             window.removeEventListener('blur', close);
@@ -607,6 +613,7 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
           document.addEventListener('mousedown', onDown, true);
           document.addEventListener('keydown', onKey, true);
           window.addEventListener('blur', close);
+          window.__dshCtxClose = close;   // 宿主切换菜单时调用
         })();
         """
 
@@ -617,6 +624,19 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             except Exception as exc:                     # noqa: BLE001
                 print(f"[html-menu] 注入右键监听失败：{type(exc).__name__}: {exc}",
                       file=sys.stderr, flush=True)
+
+        def _on_menu_closed_msg(self) -> None:
+            """页面报告菜单已关闭（点外部/Esc/选中条目都会走这里）。"""
+            self._menu_open = False
+
+        def close_html_menu(self) -> None:
+            """关掉页面里的菜单（切换用）。"""
+            try:
+                self.page().runJavaScript(
+                    "if (window.__dshCtxClose) { window.__dshCtxClose(); }")
+            except Exception:                            # noqa: BLE001
+                pass
+            self._menu_open = False
 
         def _on_page_context_menu(self, info: dict) -> None:
             """页面报告右键位置后，把菜单画在那儿。"""
@@ -630,6 +650,7 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
                     "selected_text": info.get("sel") or "",
                 }
                 self._show_html_menu(int(info.get("x", 0)), int(info.get("y", 0)), self._ctx)
+                self._menu_open = True
             except Exception as exc:                     # noqa: BLE001
                 print(f"[html-menu] 画菜单失败：{type(exc).__name__}: {exc}",
                       file=sys.stderr, flush=True)
@@ -663,6 +684,7 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
                 "hover": _col(theme, "hover", "surface_alt"),
             }
             self.page().runJavaScript(js)
+            self._menu_open = True
 
         def build_menu(self):
             """拼出**窗口内浮层菜单**（PopupMenu）。
@@ -1046,6 +1068,7 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             view = _BrowserView(self)          # 自定义右键菜单：Qt 默认那份是英文
             page = _BrowserPage(self._profile, view, view._run_action)
             page._on_menu_request = view._on_page_context_menu
+            page._on_menu_closed = view._on_menu_closed_msg
             view.setPage(page)
             view.loadFinished.connect(lambda _ok, v=view: v._inject_ctx_hook())
             view.urlChanged.connect(lambda _u, v=view: self._on_url_changed(v))
@@ -1083,9 +1106,17 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
                        for text, _id, _en in items]
             # 位置要贴着「⋮」按钮：把它在**视图坐标系**里的位置算出来
             # （早先写死 80,60，菜单跑到左上角去了 —— 用户截图里就是这个问题）。
+            if getattr(view, "_menu_open", False):
+                # 再点一次同一个按钮 → 关闭（用户要求：切换语义）
+                view.close_html_menu()
+                return
             try:
-                bottom_right = anchor.mapToGlobal(QPoint(anchor.width(), anchor.height()))
-                local = view.mapFromGlobal(bottom_right)
+                # 纵向贴**工具栏底边**而不是按钮底边：按钮在工具栏里有内边距，
+                # 贴按钮底边会留一道缝（用户截图里那道）。横向仍按按钮右边缘对齐。
+                bar = anchor.parentWidget() or anchor
+                x_global = anchor.mapToGlobal(QPoint(anchor.width(), 0)).x()
+                y_global = bar.mapToGlobal(QPoint(0, bar.height())).y()
+                local = view.mapFromGlobal(QPoint(x_global, y_global))
                 # ⚠️ 要除以设备像素比：mapToGlobal/mapFromGlobal 给的是 **Qt 逻辑坐标**，
                 # 而菜单是在**页面**里按 CSS 像素定位的。高分屏（DPR=2）下不除这一下，
                 # 菜单会离按钮远一倍高度（用户截图：顶部没紧贴按钮底部，差的就是这个）。
