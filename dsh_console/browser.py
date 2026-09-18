@@ -401,18 +401,30 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             super().__init__(profile, parent)
             self._on_menu_click = on_menu_click
 
-        def acceptNavigationRequest(self, url, nav_type, is_main_frame):  # noqa: N802
-            target = url.toString()
-            if target.startswith("dsh-menu://"):
-                from urllib.parse import unquote
+        def javaScriptConsoleMessage(self, level, message, line, source):  # noqa: N802
+            """页面用 console.log 把两件事报上来（唯一的回传通道，见 _CTX_JS 的说明）：
 
+            * ``dsh-ctx:{...}``  —— 这里被右键了（含坐标、链接、选中、是否可编辑）
+            * ``dsh-menu:<id>``  —— 菜单里这一项被点了
+            """
+            text = str(message or "")
+            if text.startswith("dsh-ctx:"):
                 try:
-                    self._on_menu_click(unquote(target[len("dsh-menu://"):]))
+                    import json as _json
+
+                    self._on_menu_request(_json.loads(text[len("dsh-ctx:"):]))
+                except Exception as exc:                 # noqa: BLE001
+                    print(f"[html-menu] 右键请求失败：{type(exc).__name__}: {exc}",
+                          file=sys.stderr, flush=True)
+                return
+            if text.startswith("dsh-menu:"):
+                try:
+                    self._on_menu_click(text[len("dsh-menu:"):])
                 except Exception as exc:                 # noqa: BLE001
                     print(f"[html-menu] 动作失败：{type(exc).__name__}: {exc}",
                           file=sys.stderr, flush=True)
-                return False                             # 拦下，不做导航
-            return super().acceptNavigationRequest(url, nav_type, is_main_frame)
+                return
+            super().javaScriptConsoleMessage(level, message, line, source)
 
     class _BrowserView(QWebEngineView):
         """带**中文右键菜单**的 WebEngine 视图。
@@ -504,6 +516,38 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
                 if hasattr(page.WebAction, "CopyImageToClipboard"):
                     page.triggerAction(page.WebAction.CopyImageToClipboard)
 
+        #: 注入到每个页面的右键监听。
+        #:
+        #: 为什么要在页面里监听：实测 QtWebEngine **既不调用** contextMenuEvent，
+        #: 也**不把鼠标释放交给我们**（右键始终无反应）。而 DOM 的 contextmenu 事件
+        #: 一定会来 —— 让页面把它连同"点在哪、点到了什么"一起报给宿主，
+        #: 走已经验证可靠的哨兵地址通道（acceptNavigationRequest）。
+        _CTX_JS = """
+        (function () {
+          if (window.__dshCtxHooked) { return 'already'; }
+          window.__dshCtxHooked = true;
+          document.addEventListener('contextmenu', function (ev) {
+            try {
+              var t = ev.target || {};
+              var a = t.closest ? t.closest('a') : null;
+              var info = {
+                x: Math.round(ev.clientX), y: Math.round(ev.clientY),
+                link: a ? a.href : '',
+                sel: String(window.getSelection ? window.getSelection() : ''),
+                editable: !!(t.isContentEditable || /^(INPUT|TEXTAREA)$/.test(t.tagName || '')),
+                image: !!((t.tagName || '') === 'IMG')
+              };
+              ev.preventDefault();
+              // 用 console.log 回传：宿主重写 javaScriptConsoleMessage 一定能收到。
+              // （哨兵 URL 那条路走不通 —— Chromium 对未知 scheme 直接忽略，
+              //   acceptNavigationRequest 根本不会被调用，实测就是"右键毫无反应"。）
+              console.log('dsh-ctx:' + JSON.stringify(info));
+            } catch (e) { /* 页面里出错不能影响它自己 */ }
+          }, true);
+          return 'hooked';
+        })();
+        """
+
         #: 画在页面里的菜单。**不创建任何 Qt 控件**，所以不受合成器/事件循环影响。
         _HTML_MENU_JS = """
         (function () {
@@ -536,7 +580,8 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
               b.addEventListener('mouseleave', function () { b.style.background = 'transparent'; });
               b.addEventListener('click', function (ev) {
                 ev.preventDefault(); ev.stopPropagation();
-                location.href = 'dsh-menu://' + encodeURIComponent(it[1]);
+                console.log('dsh-menu:' + it[1]);
+                close();
               });
             }
             d.appendChild(b);
@@ -559,6 +604,30 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
           window.addEventListener('blur', close);
         })();
         """
+
+        def _inject_ctx_hook(self) -> None:
+            """把右键监听注入当前页面（每次加载完都要来一遍）。"""
+            try:
+                self.page().runJavaScript(self._CTX_JS)
+            except Exception as exc:                     # noqa: BLE001
+                print(f"[html-menu] 注入右键监听失败：{type(exc).__name__}: {exc}",
+                      file=sys.stderr, flush=True)
+
+        def _on_page_context_menu(self, info: dict) -> None:
+            """页面报告右键位置后，把菜单画在那儿。"""
+            try:
+                self._ctx = {
+                    "editable": bool(info.get("editable")),
+                    "selected": bool(info.get("sel")),
+                    "link_url": info.get("link") or "",
+                    "is_image": bool(info.get("image")),
+                    "media_url": info.get("link") or "",
+                    "selected_text": info.get("sel") or "",
+                }
+                self._show_html_menu(int(info.get("x", 0)), int(info.get("y", 0)), self._ctx)
+            except Exception as exc:                     # noqa: BLE001
+                print(f"[html-menu] 画菜单失败：{type(exc).__name__}: {exc}",
+                      file=sys.stderr, flush=True)
 
         def _show_html_menu(self, pos_x: int, pos_y: int, ctx: dict | None = None,
                             items: list | None = None) -> None:
@@ -970,7 +1039,10 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
         # ---------------------------------------------------------- 标签
         def add_tab(self, url: str | None = None):
             view = _BrowserView(self)          # 自定义右键菜单：Qt 默认那份是英文
-            view.setPage(_BrowserPage(self._profile, view, view._run_action))
+            page = _BrowserPage(self._profile, view, view._run_action)
+            page._on_menu_request = view._on_page_context_menu
+            view.setPage(page)
+            view.loadFinished.connect(lambda _ok, v=view: v._inject_ctx_hook())
             view.urlChanged.connect(lambda _u, v=view: self._on_url_changed(v))
             view.titleChanged.connect(lambda t, v=view: self._on_title(t, v))
             view.loadStarted.connect(lambda: self.lbl_state.setText("加载中…"))
@@ -1004,8 +1076,16 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             by_text = {a.text(): a for a in self.actions() if a.text()}
             payload = [[text, text, bool(by_text.get(text) and by_text[text].isEnabled())]
                        for text, _id, _en in items]
+            # 位置要贴着「⋮」按钮：把它在**视图坐标系**里的位置算出来
+            # （早先写死 80,60，菜单跑到左上角去了 —— 用户截图里就是这个问题）。
+            try:
+                origin = anchor.mapToGlobal(QPoint(0, anchor.height()))
+                local = view.mapFromGlobal(origin)
+                x, y = local.x(), local.y()
+            except Exception:                            # noqa: BLE001
+                x, y = 80, 60
             view._ctx = {}
-            view._show_html_menu(80, 60, items=payload)
+            view._show_html_menu(max(0, x), max(0, y), items=payload)
 
         def _close_current(self) -> None:
             """关掉当前标签（菜单项用；Ctrl+W 也走这里）。"""
