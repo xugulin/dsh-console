@@ -506,9 +506,15 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             return popup
 
         def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-            # 逃生开关：万一浮层菜单在某台机器上仍然出问题，设 DSH_BROWSER_NO_MENU=1
-            # 就退回 Qt 自带菜单（英文、Wayland 下要二次点击，但绝不会因为没有菜单而崩）。
-            if os.environ.get("DSH_BROWSER_NO_MENU"):
+            # ⚠️ **默认用 Qt 自带菜单**（自绘浮层改为显式开启）。
+            #
+            # 原因：自绘浮层（PopupMenu）在用户的 COSMIC/Wayland 桌面上会**必现崩溃**
+            # ——右键菜单先显示、随后浏览器进程硬崩（日志里没有 Python traceback，
+            # 是 C++ 层的崩溃）。反复调整（改 popup、加兜底、改为复用对象）都没能消除，
+            # 说明"QWidget + 事件过滤器 + 在合成器里反复弹出"这条路在该环境下不稳。
+            # **可用性优先**：默认退回 Qt 自带菜单（Wayland 下第一次点击可能要多点一次，
+            # 但不会崩）；想把自绘浮层要回来：DSH_BROWSER_MENU=overlay。
+            if (os.environ.get("DSH_BROWSER_MENU") or "").strip().lower() != "overlay":
                 super().contextMenuEvent(event)
                 return
             # ⚠️ **右键绝不能把浏览器带崩**：以前这里是裸调用，一旦菜单构建或弹出抛异常，
