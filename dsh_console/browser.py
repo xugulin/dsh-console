@@ -586,11 +586,16 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             }
             d.appendChild(b);
           });
-          var px = Math.min(x, Math.max(0, window.innerWidth - d.offsetWidth - 8));
-          var py = Math.min(y, Math.max(0, window.innerHeight - d.offsetHeight - 8));
-          d.style.left = (d.offsetWidth > window.innerWidth - 16 ? 8 : px) + 'px';
-          d.style.top = py + 'px';
+          // ⚠️ **必须先挂到页面上再测量**：游离（未插入文档）的元素 offsetWidth/offsetHeight
+          // 恒为 0 —— 早先先测量后插入，贴边翻转完全失效，菜单右侧一大半被窗口裁掉
+          // （用户截图里就是这个问题）。
           document.body.appendChild(d);
+          var vw = window.innerWidth, vh = window.innerHeight;
+          var w = d.offsetWidth, h = d.offsetHeight;
+          var left = (x + w + 8 > vw) ? Math.max(8, vw - w - 8) : x;   // 右边界外 → 贴右边
+          var top = (y + h + 8 > vh) ? Math.max(8, vh - h - 8) : y;    // 下边界外 → 贴下边
+          d.style.left = left + 'px';
+          d.style.top = top + 'px';
           function close() {
             if (d.parentNode) { d.remove(); }
             document.removeEventListener('mousedown', onDown, true);
