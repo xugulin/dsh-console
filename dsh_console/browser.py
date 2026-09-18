@@ -807,6 +807,10 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             self._profile = profile
 
             self.tabs = QTabWidget()
+            # 只有一个标签时**隐藏标签栏**：那样网页视图的顶边就等于工具栏底边，
+            # 画在页面里的菜单才能真的"无缝紧贴按钮底部"（用户明确要求的效果）。
+            # 标签栏本来夹在工具栏与网页之间，那 34px 就是菜单够不到按钮的原因。
+            self.tabs.tabBar().setVisible(False)
             self.tabs.setTabsClosable(True)
             self.tabs.setMovable(True)
             self.tabs.tabCloseRequested.connect(self._close_tab)
@@ -1079,6 +1083,7 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             )
             index = self.tabs.addTab(view, "新标签页")
             self.tabs.setCurrentIndex(index)
+            self._sync_tabbar()
             if url:
                 view.setUrl(QUrl(url))
             elif self._home_url:
@@ -1086,6 +1091,13 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             else:
                 view.setHtml(shell.error_page("没有可打开的地址", note or ""))
             return view
+
+        def _sync_tabbar(self) -> None:
+            """标签数 > 1 才显示标签栏（见 __init__ 里的说明）。"""
+            try:
+                self.tabs.tabBar().setVisible(self.tabs.count() > 1)
+            except Exception:                            # noqa: BLE001
+                pass
 
         def _open_overflow(self, anchor) -> None:
             """工具栏「⋮」的菜单。
@@ -1110,24 +1122,25 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
                 # 再点一次同一个按钮 → 关闭（用户要求：切换语义）
                 view.close_html_menu()
                 return
+            # 位置：**横向右对齐按钮**（换算成页面 CSS 像素），**纵向贴页面顶边**。
+            #
+            # 纵向不做几何换算是有原因的：菜单画在页面里，而页面顶边就是它能够到的
+            # 最上沿。工具栏与网页之间原本夹着标签栏（34px），怎么算都够不到按钮底部；
+            # 现在单标签时标签栏已隐藏 → 页面顶边 = 工具栏底边 → 菜单真正无缝贴合。
+            # （多标签时标签栏必须显示，那时菜单从标签栏下方开始，这是页面内菜单的物理上限。）
             try:
-                # 纵向贴**工具栏底边**而不是按钮底边：按钮在工具栏里有内边距，
-                # 贴按钮底边会留一道缝（用户截图里那道）。横向仍按按钮右边缘对齐。
-                bar = anchor.parentWidget() or anchor
-                x_global = anchor.mapToGlobal(QPoint(anchor.width(), 0)).x()
-                y_global = bar.mapToGlobal(QPoint(0, bar.height())).y()
-                local = view.mapFromGlobal(QPoint(x_global, y_global))
-                # ⚠️ 要除以设备像素比：mapToGlobal/mapFromGlobal 给的是 **Qt 逻辑坐标**，
-                # 而菜单是在**页面**里按 CSS 像素定位的。高分屏（DPR=2）下不除这一下，
-                # 菜单会离按钮远一倍高度（用户截图：顶部没紧贴按钮底部，差的就是这个）。
-                # 右键那条路不受影响 —— 页面报上来的 clientX/clientY 本来就是 CSS 像素。
-                try:
-                    dpr = float(view.devicePixelRatioF()) or 1.0
-                except Exception:                        # noqa: BLE001
-                    dpr = 1.0
-                x, y = local.x() / dpr, local.y() / dpr
+                dpr = float(view.devicePixelRatioF()) or 1.0
             except Exception:                            # noqa: BLE001
-                x, y = 80, 60
+                dpr = 1.0
+            try:
+                right_in_view = view.mapFromGlobal(
+                    anchor.mapToGlobal(QPoint(anchor.width(), 0)))
+                x = int(max(0, right_in_view.x() / dpr))
+            except Exception:                            # noqa: BLE001
+                x = 80
+            # 菜单宽度未知，交给页面自己贴右边界（脚本里有钳制）；这里给一个够右的值，
+            # 让它靠右对齐到按钮下方（x 为按钮右边缘，菜单从该点向左展开由页面钳制处理）。
+            y = 0
             view._ctx = {}
             view._show_html_menu(int(max(0, x)), int(max(0, y)), items=payload)
 
@@ -1145,6 +1158,7 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             if self.tabs.count() == 0:
                 self.close()
 
+            self._sync_tabbar()
         def _view(self):
             return self.tabs.currentWidget()
 
