@@ -244,37 +244,44 @@ def _parse_systemd_time(value: str) -> datetime | None:
 #: 4 个子进程（systemctl / ss / journalctl / loginctl）外加 1 次 HTTP。
 #: 两边共享同一份快照可以砍掉一半开销。
 _status_lock = threading.Lock()
+_status_key = ""          # 缓存对应的来源（见 get_status_cached）
 _status_snapshot: "ServiceStatus | None" = None
 _status_at: float = 0.0
 
 
 def invalidate_status() -> None:
     """让下次取状态必须重新采集（启停重启之后调用）。"""
-    global _status_snapshot, _status_at
+    global _status_snapshot, _status_at, _status_key
     with _status_lock:
         _status_snapshot, _status_at = None, 0.0
 
 
-def get_status_cached(max_age: float = 2.0, unit: str = UNIT) -> ServiceStatus:
-    """带 TTL 的状态快照；``max_age`` 秒内的重复请求直接复用。"""
-    global _status_snapshot, _status_at
+def get_status_cached(max_age: float = 2.0, unit: str = UNIT,
+                      source: str | None = None) -> ServiceStatus:
+    """带 TTL 的状态快照；``max_age`` 秒内的重复请求直接复用。
+
+    ⚠️ 缓存**按来源分开记**：``source`` 不同（内置那份 / 系统那份）状态本来就不同，
+    共用一个快照会让"另一份"查到当前这份的结果。
+    """
+    global _status_snapshot, _status_at, _status_key
+    key = source or ""
     with _status_lock:
-        snap, at = _status_snapshot, _status_at
-    if snap is not None and (time.monotonic() - at) < max_age:
+        snap, at, cached_key = _status_snapshot, _status_at, _status_key
+    if snap is not None and cached_key == key and (time.monotonic() - at) < max_age:
         return snap
-    st = get_status(unit)
+    st = get_status(unit, source=source)
     with _status_lock:
-        _status_snapshot, _status_at = st, time.monotonic()
+        _status_snapshot, _status_at, _status_key = st, time.monotonic(), key
     return st
 
 
-def get_status(unit: str = UNIT) -> ServiceStatus:
+def get_status(unit: str = UNIT, source: str | None = None) -> ServiceStatus:
     """读取一次完整状态。任何失败都体现在 ``raw_error`` 里，不抛异常。
 
     便携模式下没有 systemd，harness 是控制台自己拉起来的子进程——走
     :func:`_portable_status`。
     """
-    if use_child_backend():
+    if use_child_backend(source):
         return _portable_status()
     props = (
         "LoadState",
@@ -493,16 +500,19 @@ def _portable_log_path() -> Path | None:
     return _run_dir() / "web.log"
 
 
-def use_child_backend() -> bool:
+def use_child_backend(source: str | None = None) -> bool:
     """web 服务该不该用"子进程"后端（而不是 systemd）。
 
-    判断依据是**当前选中的 harness 来源**，不再只是"是不是便携模式"：
+    判断依据是**选中的 harness 来源**，不再只是"是不是便携模式"：
     内置那份永远用子进程拉起来（它不在 systemd 单元里）；系统那份在 Linux 上
     走 systemd 单元。
+
+    ``source`` 用于**临时查另一份**的状态（见 :func:`get_status`）：传了就按它算，
+    **不读也不写**用户当前的选择——查状态绝不能顺手改掉用户的设置。
     """
     from . import harness as _harness
 
-    return _harness.current_source() == _harness.SOURCE_BUNDLED
+    return (source or _harness.current_source()) == _harness.SOURCE_BUNDLED
 
 
 def pid_alive(pid: int) -> bool:

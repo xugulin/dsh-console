@@ -274,6 +274,24 @@ class DashboardPage(ScrollPage):
         else:
             self.pill.set_state(st.label, self.theme.text_faint, self.theme.text)
 
+        # ① 「两份 harness 都报出来」。便携包默认管的是**内置**那份，而用户很可能在跑
+        # **系统**那份——只报当前这份，就会看到"系统 harness 明明在跑却显示已停止"
+        # （实测反馈）。这里把两份各报一行，且**不改变**用户当前的选择。
+        try:
+            other = (harness.SOURCE_SYSTEM
+                     if harness.current_source() == harness.SOURCE_BUNDLED
+                     else harness.SOURCE_BUNDLED)
+            cur_name = harness.source_label(harness.current_source())
+            oth_name = harness.source_label(other)
+            oth = service.get_status_cached(source=other)
+            oth_txt = "运行中" if oth.is_running else ("已停止" if not oth.is_failed else "启动失败")
+            oth_pid = f"（pid {oth.effective_pid}）" if oth.is_running and oth.effective_pid else ""
+            self.unit_label.setText(
+                f"当前管理：{cur_name} · {st.label}"
+                f"　｜　{oth_name}：{oth_txt}{oth_pid}")
+        except Exception:                      # noqa: BLE001 - 查不到就别动这行字
+            pass
+
         self.m_pid.set_value(str(st.effective_pid) if st.effective_pid else "—")
         # 停着的时候别把这一格还叫"运行时长"：service.uptime_seconds 对停止的服务
         # 返回 0，硬显示会变成"运行时长 —"；而 ActiveEnterTimestamp 在停止后指的是
