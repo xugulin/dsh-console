@@ -290,6 +290,23 @@ def _waiting_page(note: str) -> str:
 #: 那份翻译里**根本没有这些条目**——把 qtwebengine_zh_CN.qm 装上，菜单照样全英文
 #: （文件里只有"下载/请求"那十几条）。所以想要中文菜单只有自己建这一条路。
 #: 标签走 :func:`i18n.tr`，于是它跟着界面的中/EN 开关一起切。
+class _FallbackTheme:
+    """菜单用的最小主题：只保证 PopupMenu 需要的几个颜色字段存在。
+
+    真主题对象字段缺失/解析失败时用它顶上——**菜单画得丑一点没关系，不能没有菜单**。
+    """
+
+    surface = "#1e1e22"
+    bg = "#1e1e22"
+    border = "#3a3a42"
+    text = "#e8e8ea"
+    hover = "#2c2c33"
+    surface_alt = "#2c2c33"
+    dim = "#9a9aa2"
+    text_faint = "#9a9aa2"
+    accent = "#4c8dff"
+
+
 def context_menu_items(*, editable: bool = False, has_selection: bool = False,
                        link_url: str = "", media_is_image: bool = False,
                        media_url: str = "") -> list[tuple[str, str, bool]]:
@@ -470,14 +487,31 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
                     link_url=ctx["link_url"], media_is_image=ctx["is_image"],
                     media_url=ctx["media_url"])
             ]
-            theme = getattr(self._owner, "theme", None) or bt.resolve(*current_choice())
+            try:
+                theme = getattr(self._owner, "theme", None) or bt.resolve(*current_choice())
+            except Exception as exc:                     # noqa: BLE001
+                # 主题取不到不该让菜单消失：用一个最小主题顶上，并把原因写进日志
+                print(f"[context-menu] 主题解析失败：{type(exc).__name__}: {exc}",
+                      file=sys.stderr, flush=True)
+                theme = _FallbackTheme()
             popup = PopupMenu(self.window(), items, theme)
             popup.triggered.connect(self._run_action)
             return popup
 
         def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-            # 浮层菜单是窗口内的子控件，不经过合成器 —— 第一次点击就能弹（Wayland 也一样）。
-            self.build_menu().popup(event.globalPos())
+            # 逃生开关：万一浮层菜单在某台机器上仍然出问题，设 DSH_BROWSER_NO_MENU=1
+            # 就退回 Qt 自带菜单（英文、Wayland 下要二次点击，但绝不会因为没有菜单而崩）。
+            if os.environ.get("DSH_BROWSER_NO_MENU"):
+                super().contextMenuEvent(event)
+                return
+            # ⚠️ **右键绝不能把浏览器带崩**：以前这里是裸调用，一旦菜单构建或弹出抛异常，
+            # PySide6 在虚函数里抛异常会直接终止进程（用户看到的就是"一右键就崩"）。
+            # 现在兜住一切异常并**把原因写进 browser.log**，浏览器照常可用。
+            try:
+                self.build_menu().popup(event.globalPos())
+            except Exception as exc:                     # noqa: BLE001
+                print(f"[context-menu] 构建/弹出失败：{type(exc).__name__}: {exc}",
+                      file=sys.stderr, flush=True)
             event.accept()
 
     class Browser(QMainWindow):
