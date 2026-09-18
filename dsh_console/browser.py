@@ -482,6 +482,12 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             if act_id in action_map:
                 page.triggerAction(action_map[act_id])
                 return
+            # 「更多」菜单的条目 id 就是动作文本：交给窗口上那份 QAction
+            if act_id:
+                for act in self._owner.actions() if hasattr(self, "_owner") else []:
+                    if act.text() == act_id and act.isEnabled():
+                        act.trigger()
+                        return
             if act_id == "open_link_new_tab":
                 self._owner.add_tab(ctx.get("link_url", ""))
             elif act_id == "copy_link":
@@ -554,17 +560,22 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
         })();
         """
 
-        def _show_html_menu(self, pos_x: int, pos_y: int, ctx: dict) -> None:
-            """把右键菜单画进当前页面（纯 DOM）。"""
+        def _show_html_menu(self, pos_x: int, pos_y: int, ctx: dict | None = None,
+                            items: list | None = None) -> None:
+            """把菜单画进当前页面（纯 DOM）。``items`` 给了就直接用（「更多」菜单走这条）。"""
             import json as _json
 
-            items = [
-                [i18n.tr(label), act_id, bool(enabled)]
-                for label, act_id, enabled in context_menu_items(
-                    editable=ctx["editable"], has_selection=ctx["selected"],
-                    link_url=ctx["link_url"], media_is_image=ctx["is_image"],
-                    media_url=ctx["media_url"])
-            ]
+            if items is None:
+                ctx = ctx or {}
+                items = [
+                    [i18n.tr(label), act_id, bool(enabled)]
+                    for label, act_id, enabled in context_menu_items(
+                        editable=ctx.get("editable", False),
+                        has_selection=ctx.get("selected", False),
+                        link_url=ctx.get("link_url", ""),
+                        media_is_image=ctx.get("is_image", False),
+                        media_url=ctx.get("media_url", ""))
+                ]
             try:
                 theme = getattr(self._owner, "theme", None) or bt.resolve(*current_choice())
             except Exception:                            # noqa: BLE001
@@ -611,6 +622,31 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             else:
                 popup.set_items(items)
             return popup
+
+        def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+            """右键在**鼠标事件**里接管。
+
+            为什么不用 contextMenuEvent：实测**它根本不会被调用**（QtWebEngine 自己把右键
+            吃掉了）—— 用户反馈"右键不显示菜单也不崩"正是这个原因（我的 HTML 菜单代码
+            是对的，只是没人调用它）。这里从鼠标释放直接接管，稳妥且与平台无关。
+            """
+            if event.button() == Qt.MouseButton.RightButton:
+                mode = (os.environ.get("DSH_BROWSER_MENU") or "html").strip().lower()
+                if mode == "html":
+                    try:
+                        ctx = self._menu_context()
+                        self._ctx = ctx
+                        pos = event.position().toPoint()
+                        self._show_html_menu(pos.x(), pos.y(), ctx)
+                    except Exception as exc:             # noqa: BLE001
+                        print(f"[html-menu] 失败：{type(exc).__name__}: {exc}",
+                              file=sys.stderr, flush=True)
+                    event.accept()
+                    return
+                if mode == "none":
+                    event.accept()
+                    return
+            super().mouseReleaseEvent(event)
 
         def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt 命名
             # ⚠️ **默认用 Qt 自带菜单**（自绘浮层改为显式开启）。
@@ -952,21 +988,24 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             return view
 
         def _open_overflow(self, anchor) -> None:
-            """工具栏「⋮」的浮层菜单（窗口内浮层，见 components.PopupMenu）。"""
+            """工具栏「⋮」的菜单。
+
+            ⚠️ 也用**网页内菜单**：早先它走自绘浮层控件（PopupMenu），而用户实测
+            "点开菜单显示后立即崩" —— 和右键菜单当初是同一个病根。既然网页内菜单
+            已经验证可用且不会崩，这里统一过来。
+            """
             items = getattr(self, "_overflow_items", None) or []
             if not items:
                 return
+            view = self.tabs.currentWidget()
+            if view is None or not hasattr(view, "_show_html_menu"):
+                return
+            # 条目的 id 就是动作文本；按文本找回已注册的 QAction（快捷键挂在窗口上）
             by_text = {a.text(): a for a in self.actions() if a.text()}
-            theme = getattr(self, "theme", None) or bt.resolve(*current_choice())
-            popup = PopupMenu(self, items, theme)
-
-            def run(text: str) -> None:
-                act = by_text.get(text)
-                if act is not None and act.isEnabled():
-                    act.trigger()
-
-            popup.triggered.connect(run)
-            popup.popup(anchor.mapToGlobal(QPoint(0, anchor.height())))
+            payload = [[text, text, bool(by_text.get(text) and by_text[text].isEnabled())]
+                       for text, _id, _en in items]
+            view._ctx = {}
+            view._show_html_menu(80, 60, items=payload)
 
         def _close_current(self) -> None:
             """关掉当前标签（菜单项用；Ctrl+W 也走这里）。"""
