@@ -129,6 +129,8 @@ class DashboardPage(ScrollPage):
         self.btn_stop = QPushButton("停止")
         self.btn_stop.setObjectName("Danger")
         self.btn_open = QPushButton("内置浏览器打开界面")
+        # 内置浏览器是默认动作 → 高亮（用户要求）
+        self.btn_open.setObjectName("Primary")
         self.btn_url = QPushButton("复制访问地址")
         self.btn_url.setObjectName("Ghost")
 
@@ -150,13 +152,17 @@ class DashboardPage(ScrollPage):
         frow = QHBoxLayout()
         frow.setSpacing(10)
         self.btn_web = QPushButton("用系统浏览器打开")
-        self.btn_web.setObjectName("Primary")
+        # 系统浏览器不再是默认动作：高亮让给"用内置浏览器打开"（用户要求）
+
+        self.btn_web.setObjectName("Segment")
         self.btn_web.setToolTip(
             "保证 harness 在跑，然后用**系统默认浏览器**打开带 token 的界面。\n"
             "机器上没有浏览器时用左边那个内置的。"
         )
         # 紧挨着 web 版：同一件事的两种打开方式，放一起才好对比
         self.btn_browser = QPushButton("用内置浏览器打开")
+        # 内置浏览器是默认动作 → 高亮（用户要求）
+        self.btn_browser.setObjectName("Primary")
         self.btn_browser.setToolTip(
             "用随包携带的 Chromium（QtWebEngine）打开界面。\n"
             "独立 profile，不碰你自己的浏览器；机器上没装浏览器也能用。"

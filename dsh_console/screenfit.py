@@ -97,7 +97,15 @@ def prefer_xwayland(env_var: str, *, default: str = "xcb") -> str:
     qpa = (os.environ.get("QT_QPA_PLATFORM") or "").strip()
     on_wayland = bool(os.environ.get("WAYLAND_DISPLAY")) or "wayland" in qpa
     # 没有 XWayland（DISPLAY 为空）时不能切，否则 Qt 起不来
-    if on_wayland and os.environ.get("DISPLAY"):
-        os.environ["QT_QPA_PLATFORM"] = default
-        return default
-    return qpa or ""
+    if not (on_wayland and os.environ.get("DISPLAY")):
+        return qpa or ""
+    # ⚠️ 不要**替换**成单个 "xcb"：那样会把 Qt 的平台回退链拆掉——万一 DISPLAY 指向
+    # 一个已失效的 XWayland（换过会话、Xwayland 崩过都很常见），Qt 会**直接起不来**，
+    # 而不是退回 Wayland。Qt 的多值写法是"按顺序尝试"，所以写成 "xcb;wayland"：
+    # 有 XWayland 就用它（菜单能弹），没有就自动退回原生 Wayland（至少能启动）。
+    parts = [p.strip() for p in qpa.split(";") if p.strip()]
+    chain = [default] + [p for p in parts if p != default]
+    if not chain[1:]:
+        chain.append("wayland")
+    os.environ["QT_QPA_PLATFORM"] = ";".join(chain)
+    return os.environ["QT_QPA_PLATFORM"]

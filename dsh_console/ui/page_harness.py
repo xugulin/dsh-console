@@ -471,6 +471,8 @@ class HarnessPage(ScrollPage):
         actions = QHBoxLayout()
         actions.setSpacing(10)
         self.btn_browser_open = QPushButton("用内置浏览器打开")
+        # 内置浏览器是默认动作 → 高亮（用户要求）
+        self.btn_browser_open.setObjectName("Primary")
         self.btn_browser_check = QPushButton("检查引擎更新")
         self.btn_browser_update = QPushButton("升级引擎")
         self.btn_browser_info = QPushButton("详情 / 打开 profile 目录")
