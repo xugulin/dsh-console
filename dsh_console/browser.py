@@ -494,8 +494,15 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
                 print(f"[context-menu] 主题解析失败：{type(exc).__name__}: {exc}",
                       file=sys.stderr, flush=True)
                 theme = _FallbackTheme()
-            popup = PopupMenu(self.window(), items, theme)
-            popup.triggered.connect(self._run_action)
+            # **复用一个菜单对象**（不每次新建/销毁）：销毁发生在事件过滤器里会与 Qt 的
+            # 过滤器遍历竞态，表现为偶发崩溃（用户："菜单先显示，然后崩"）。
+            popup = getattr(self, "_popup", None)
+            if popup is None:
+                popup = PopupMenu(self.window(), items, theme)
+                popup.triggered.connect(self._run_action)
+                self._popup = popup
+            else:
+                popup.set_items(items)
             return popup
 
         def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt 命名

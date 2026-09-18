@@ -154,6 +154,43 @@ class PopupMenu(QWidget):
         self.setFixedWidth(width)
         self.adjustSize()
         self.hide()
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        #: 被 close 过标记：过滤器里靠它避免重复处理
+        self._closed = True
+
+    # ---------------------------------------------------------------- 复用
+    def set_items(self, items) -> None:
+        """重建条目（复用同一个菜单对象时用；见 close_menu 的说明）。"""
+        lay = self.layout()
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+        self._buttons = []
+        theme = self._theme
+        for label, item_id, enabled in items:
+            if not label and not item_id:
+                line = QFrame(self)
+                line.setFixedHeight(1)
+                line.setStyleSheet(f"background: {_col(theme, 'border')}; border: none;")
+                lay.addWidget(line)
+                continue
+            btn = QPushButton(label, self)
+            btn.setObjectName("PopupItem")
+            btn.setEnabled(bool(enabled))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton#PopupItem { text-align: left; padding: 5px 10px; border: none;"
+                f" background: transparent; color: {_col(theme, 'text')}; font-size: 12.5px;"
+                f" border-radius: 5px; }}"
+                f"QPushButton#PopupItem:hover {{ background: {_col(theme, 'hover', 'surface_alt')}; }}"
+                f"QPushButton#PopupItem:disabled {{ color: {_col(theme, 'dim', 'text_faint')}; }}"
+            )
+            btn.clicked.connect(lambda _c=False, i=item_id: self._fire(i))
+            lay.addWidget(btn)
+            self._buttons.append(btn)
+        self.adjustSize()
 
     # ---------------------------------------------------------------- 弹出与关闭
     def popup(self, global_pos) -> None:
@@ -173,6 +210,7 @@ class PopupMenu(QWidget):
             except Exception:                # noqa: BLE001
                 pass
         PopupMenu._current = self
+        self._closed = False
         self.move(x, y)
         self.show()
         self.raise_()
@@ -192,16 +230,17 @@ class PopupMenu(QWidget):
                 first.setFocus()
 
     def close_menu(self) -> None:
+        """关闭菜单。
+
+        ⚠️ **只隐藏，绝不销毁。** 早先这里用 deleteLater：菜单是在事件过滤器里被关掉的，
+        而 Qt 正在遍历过滤器链 —— 在遍历中销毁对象是竞态，表现为**偶发崩溃**
+        （用户描述："悬浮菜单先显示，然后崩"）。现在菜单由父窗口持有、反复复用，
+        竞态从构造上消失。
+        """
         if PopupMenu._current is self:
             PopupMenu._current = None
-        win = self.window()
-        if win is not None:
-            win.removeEventFilter(self)
-        app = QApplication.instance()
-        if app is not None:
-            app.removeEventFilter(self)
+        self._closed = True
         self.hide()
-        QTimer.singleShot(0, self.deleteLater)   # 别在自身信号里直接销毁
 
     def _fire(self, item_id: str) -> None:
         self.close_menu()
@@ -209,6 +248,17 @@ class PopupMenu(QWidget):
 
     # ---------------------------------------------------------------- 交互
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt 命名
+        # 对象可能已经被 Qt 回收（父窗口析构时）：先确认 C++ 对象还活着，
+        # 否则下面任何一次属性访问都会抛 RuntimeError —— 在过滤器中抛异常会直接终止进程。
+        try:
+            import shiboken6
+
+            if not shiboken6.isValid(self):
+                return False
+        except Exception:                    # noqa: BLE001
+            pass
+        if self._closed and event.type() != QEvent.Type.MouseButtonPress:
+            return False
         etype = event.type()
         if etype == QEvent.Type.MouseButtonPress:
             gp = None
