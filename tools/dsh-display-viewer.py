@@ -46,6 +46,10 @@ _latest: bytes = b""
 _lock = threading.Lock()
 
 
+#: 协议注入工具（tools/virtual-pointer 编译产物）。取不到就退回 ydotool。
+VPTR = os.environ.get("DSH_VIEW_VPTR") or os.path.expanduser("~/.cache/dsh-display/vptr/vptr")
+
+
 def run_tool(argv: list[str]) -> None:
     try:
         proc = subprocess.run(argv, env=ENV, capture_output=True, timeout=10)
@@ -61,14 +65,23 @@ def inject(obj: dict) -> None:
     kind = obj.get("t")
     x, y = obj.get("x"), obj.get("y")
     if kind in ("click", "move") and x is not None and y is not None:
-        run_tool(["ydotool", "mousemove", "--absolute",
-                  "-x", str(int(float(x) * W)), "-y", str(int(float(y) * H))])
+        px, py = int(float(x) * W), int(float(y) * H)
+        if os.path.exists(VPTR):
+            # **首选**：走合成器的虚拟指针协议（与 wtype 同理，不需要额外权限）
+            run_tool([VPTR, "absolute", str(px), str(py), str(W), str(H)])
+        else:
+            run_tool(["ydotool", "mousemove", "--absolute", "-x", str(px), "-y", str(py)])
         if kind == "click":
             # ⚠️ ydotool click 收的是 **evdev 按键码**：BTN_LEFT=0x110、BTN_RIGHT=0x111、
             # BTN_MIDDLE=0x112。早先传 0x1/0x2/0x3 是无效码 —— 命令"成功"但什么都不发生
             # （排查了很久的"点击没反应"就是这个）。
-            btn = {1: "0x110", 2: "0x111", 3: "0x112"}.get(int(obj.get("b") or 1), "0x110")
-            run_tool(["ydotool", "click", btn])
+            btn = {1: 272, 2: 273, 3: 274}.get(int(obj.get("b") or 1), 272)  # evdev BTN_*
+            if os.path.exists(VPTR):
+                run_tool([VPTR, "button", str(btn), "press"])
+                time.sleep(0.05)
+                run_tool([VPTR, "button", str(btn), "release"])
+            else:
+                run_tool(["ydotool", "click", hex(btn)])
     elif kind == "wheel":
         dy = float(obj.get("dy") or 0)
         button = "0x4" if dy < 0 else "0x5"      # 4=上滚 5=下滚
