@@ -43,6 +43,7 @@ from pathlib import Path
 from . import i18n
 from . import browser_theme as bt
 from .screenfit import apply_screen_fit, prefer_xwayland
+from .ui.components import PopupMenu
 from . import config as console_config
 
 #: profile 与缓存的落点。便携模式下 HOME 已被启动器指到包内，所以自动落在包里。
@@ -381,6 +382,7 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
         def __init__(self, owner, parent=None) -> None:
             super().__init__(parent)
             self._owner = owner          # 浏览器主窗口（"在新标签页打开链接"要用它的 add_tab）
+            self._ctx: dict = {}          # 本次右键位置的上下文（选中/链接/图片）
 
         def _request(self):
             page = self.page()
@@ -390,33 +392,38 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             except Exception:            # noqa: BLE001 - 拿不到就按"空白处点击"处理
                 return None
 
-        def build_menu(self):
-            """按当前语言与点击位置拼出菜单（返回 QMenu，调用方负责 exec/回收）。"""
+        def _menu_context(self) -> dict:
+            """收集点击位置的上下文（选中/链接/图片），菜单条目与动作都要用。"""
             page = self.page()
             req = self._request()
-            editable = bool(getattr(req, "isContentEditable", lambda: False)())
             selected = bool(getattr(req, "selectedText", lambda: "")())
             if not selected:
-                # 有些情况下 contextMenuData 里拿不到选中文本（版本/时序差异），
-                # 而 page().hasSelection() 才是权威——漏了它就会"选中了却没有复制"
-                # （实测反馈）。两者取或。
+                # contextMenuData 里偶尔拿不到选中文本，page().hasSelection() 才是权威
                 try:
                     selected = bool(page.hasSelection())
                 except Exception:            # noqa: BLE001
                     pass
             link = getattr(req, "linkUrl", lambda: None)()
-            link_url = link.toString() if link is not None else ""
             media = getattr(req, "mediaType", lambda: None)()
-            is_image = False
             try:
                 is_image = media == page.ContextMenuRequest.MediaType.MediaTypeImage
-            except Exception:            # noqa: BLE001
+            except Exception:                # noqa: BLE001
                 is_image = bool(getattr(req, "mediaUrl", lambda: None)()
                                 and str(media).lower().endswith("image"))
             murl = getattr(req, "mediaUrl", lambda: None)()
-            media_url = murl.toString() if murl is not None else ""
+            return {
+                "editable": bool(getattr(req, "isContentEditable", lambda: False)()),
+                "selected": selected,
+                "link_url": link.toString() if link is not None else "",
+                "is_image": is_image,
+                "media_url": murl.toString() if murl is not None else "",
+                "selected_text": (getattr(req, "selectedText", lambda: "")() or "").strip(),
+            }
 
-            menu = QMenu(self)
+        def _run_action(self, act_id: str) -> None:
+            """执行菜单条目。浮层菜单只发 id 出来，具体动作集中在这里。"""
+            page = self.page()
+            ctx = self._ctx or {}
             action_map = {
                 "back": page.WebAction.Back, "forward": page.WebAction.Forward,
                 "reload": page.WebAction.Reload, "cut": page.WebAction.Cut,
@@ -429,47 +436,48 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
                 action_map["print"] = page.WebAction.Print
             except AttributeError:
                 pass
-            for label, act_id, enabled in context_menu_items(
-                    editable=editable, has_selection=selected, link_url=link_url,
-                    media_is_image=is_image, media_url=media_url):
-                if not label and not act_id:
-                    menu.addSeparator()
-                    continue
-                act = menu.addAction(i18n.tr(label))
-                act.setEnabled(enabled)
-                if act_id in action_map:
-                    wa = action_map[act_id]
-                    act.triggered.connect(lambda _c=False, a=wa: page.triggerAction(a))
-                elif act_id == "open_link_new_tab":
-                    act.triggered.connect(
-                        lambda _c=False, u=link_url: self._owner.add_tab(u))
-                elif act_id in ("copy_link", "copy_image_address"):
-                    text = link_url if act_id == "copy_link" else media_url
-                    act.triggered.connect(
-                        lambda _c=False, t=text: QApplication.clipboard().setText(t))
-                elif act_id == "translate_selection":
-                    text = (getattr(req, "selectedText", lambda: "")() or "").strip()
-                    act.triggered.connect(
-                        lambda _c=False, t=text: self._translate(t))
-                elif act_id == "open_link_system":
-                    act.triggered.connect(
-                        lambda _c=False, u=link_url: _open_external(u))
-                elif act_id == "open_page_system":
-                    act.triggered.connect(
-                        lambda _c=False: _open_external(self.url().toString()))
-                elif act_id == "copy_image":
-                    act.triggered.connect(
-                        lambda _c=False: page.triggerAction(page.WebAction.CopyImageToClipboard)
-                        if hasattr(page.WebAction, "CopyImageToClipboard") else None)
-            return menu
+            if act_id in action_map:
+                page.triggerAction(action_map[act_id])
+                return
+            if act_id == "open_link_new_tab":
+                self._owner.add_tab(ctx.get("link_url", ""))
+            elif act_id == "copy_link":
+                QApplication.clipboard().setText(ctx.get("link_url", ""))
+            elif act_id == "copy_image_address":
+                QApplication.clipboard().setText(ctx.get("media_url", ""))
+            elif act_id == "translate_selection":
+                _translate(ctx.get("selected_text", ""))
+            elif act_id == "open_link_system":
+                _open_external(ctx.get("link_url", ""))
+            elif act_id == "open_page_system":
+                _open_external(self.url().toString())
+            elif act_id == "copy_image":
+                if hasattr(page.WebAction, "CopyImageToClipboard"):
+                    page.triggerAction(page.WebAction.CopyImageToClipboard)
+
+        def build_menu(self):
+            """拼出**窗口内浮层菜单**（PopupMenu）。
+
+            不用 QMenu：它创建的是原生 xdg_popup，Wayland 下必须有输入 serial 才允许
+            （详见 components.PopupMenu 的说明），表现就是"第一次点击弹不出来"。
+            """
+            ctx = self._menu_context()
+            self._ctx = ctx
+            items = [
+                (i18n.tr(label), act_id, enabled)
+                for label, act_id, enabled in context_menu_items(
+                    editable=ctx["editable"], has_selection=ctx["selected"],
+                    link_url=ctx["link_url"], media_is_image=ctx["is_image"],
+                    media_url=ctx["media_url"])
+            ]
+            theme = getattr(self._owner, "theme", None) or bt.resolve(*current_choice())
+            popup = PopupMenu(self.window(), items, theme)
+            popup.triggered.connect(self._run_action)
+            return popup
 
         def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-            menu = self.build_menu()
-            # 用 popup 而不是 exec：Wayland 上 exec() 的嵌套事件循环在窗口尚未被激活时
-            # 会"弹不出来/一闪而过"（实测：必须先失去一次焦点）。popup 走 xdg-popup 路径，
-            # 且不阻塞，配合 show() 后的 activateWindow() 基本就正常了。
-            menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-            menu.popup(event.globalPos())
+            # 浮层菜单是窗口内的子控件，不经过合成器 —— 第一次点击就能弹（Wayland 也一样）。
+            self.build_menu().popup(event.globalPos())
             event.accept()
 
     class Browser(QMainWindow):
@@ -525,7 +533,9 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             # **不建菜单栏**。原本"文件/视图"那一行占掉一条横带，而里面的操作要么工具栏
             # 已经有按钮（新建/关闭/重新加载），要么是低频的（开发者工具、缩放）。
             # 改成工具栏右端的「⋮」弹出菜单：横带省下来了，功能一个没少。
-            overflow = QMenu(self)
+            # 「更多」菜单同样用浮层（它是原生 QMenu 时，Wayland 下第一次点击也弹不出来）。
+            # 这里只登记条目；动作与快捷键仍挂在窗口上，浮层只是个入口。
+            overflow_items: list[tuple[str, str, bool]] = []
             for text, slot, key in (("新建标签页", lambda: self.add_tab(), "Ctrl+T"),
                                     ("关闭标签页", self._close_current, "Ctrl+W"),
                                     ("重新加载", self._reload, "Ctrl+R"),
@@ -536,21 +546,22 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
                 act.setShortcut(QKeySequence(key))
                 act.triggered.connect(slot)
                 self.addAction(act)
-                overflow.addAction(act)
-            overflow.addSeparator()
+                overflow_items.append((text, text, True))
+            overflow_items.append(("", "", False))
             for text, delta in (("放大", 1), ("缩小", -1), ("重置缩放", 0)):
                 act = QAction(text, self)
                 act.setShortcut(QKeySequence("Ctrl+0" if delta == 0 else
                                              ("Ctrl+=" if delta > 0 else "Ctrl+-")))
                 act.triggered.connect(lambda _c=False, d=delta: self._zoom(d))
                 self.addAction(act)
-                overflow.addAction(act)
-            overflow.addSeparator()
+                overflow_items.append((text, text, True))
+            overflow_items.append(("", "", False))
             quit_act = QAction("退出", self)
             quit_act.setShortcut(QKeySequence("Ctrl+Q"))
             quit_act.triggered.connect(self.close)
             self.addAction(quit_act)
-            overflow.addAction(quit_act)
+            overflow_items.append((quit_act.text(), quit_act.text(), True))
+            self._overflow_items = overflow_items
 
             # 外观按钮就放在 ＋ 左边、紧挨地址栏——用户改主题时眼睛就在地址栏上。
             # 外观按钮：**不用 QToolButton 自带的 setMenu/InstantPopup**。
@@ -581,7 +592,7 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             more.setToolTip("更多（开发者工具 / 缩放 / 退出）")
             more.setAutoRaise(True)
             more.clicked.connect(
-                lambda: overflow.exec(more.mapToGlobal(QPoint(0, more.height())))
+                lambda: self._open_overflow(more)
             )
             bar.addWidget(more)
 
@@ -769,6 +780,23 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             else:
                 view.setHtml(shell.error_page("没有可打开的地址", note or ""))
             return view
+
+        def _open_overflow(self, anchor) -> None:
+            """工具栏「⋮」的浮层菜单（窗口内浮层，见 components.PopupMenu）。"""
+            items = getattr(self, "_overflow_items", None) or []
+            if not items:
+                return
+            by_text = {a.text(): a for a in self.actions() if a.text()}
+            theme = getattr(self, "theme", None) or bt.resolve(*current_choice())
+            popup = PopupMenu(self, items, theme)
+
+            def run(text: str) -> None:
+                act = by_text.get(text)
+                if act is not None and act.isEnabled():
+                    act.trigger()
+
+            popup.triggered.connect(run)
+            popup.popup(anchor.mapToGlobal(QPoint(0, anchor.height())))
 
         def _close_current(self) -> None:
             """关掉当前标签（菜单项用；Ctrl+W 也走这里）。"""

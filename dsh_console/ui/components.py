@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QTimer, Signal
+from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
+    QPushButton,
     QScrollArea,
     QFrame,
     QHBoxLayout,
@@ -67,6 +69,146 @@ class Card(QFrame):
 
     def add_header_widget(self, w: QWidget) -> None:
         self.header.addWidget(w)
+
+
+def _col(theme, *names: str, default: str = "#333333") -> str:
+    """从主题对象里取第一个存在的颜色字段。
+
+    浏览器側是 ``BrowserTheme``（``hover``/``dim``），控制台側是 ``Theme``
+    （``surface_alt``/``text_faint``），字段名不同。共用组件必须两边都能用，
+    否则一换主题就 AttributeError（实测撞到过）。
+    """
+    for name in names:
+        value = getattr(theme, name, None)
+        if value:
+            return str(value)
+    return default
+
+
+class PopupMenu(QWidget):
+    """**窗口内的浮层菜单** —— 不创建原生弹出窗口，因此不受 Wayland 的输入 serial 限制。
+
+    ## 为什么必须自己画
+
+    Wayland 的 xdg-shell 规定：``xdg_popup`` 带 ``grab`` 时**必须**携带一个有效的输入
+    serial（合成器把输入交给客户端时下发）。窗口"收到过输入"之前 Qt 手里没有 serial，
+    于是直接拒绝创建 grabbing popup：
+
+        qt.qpa.wayland: Failed to create grabbing popup. Ensure popup ... has a
+        transientParent set and that parent window has received input.
+
+    用户看到的现象就是"右键点了没反应，要先把焦点切走一次再回来"。这是协议层面的硬约束，
+    不是 Qt 的 bug，也没法用参数绕开。**唯一干净的做法就是不再要原生弹出菜单**：
+    本类是父窗口的普通子控件，不经过合成器 → 没有 serial 要求 → 任何合成器
+    （Wayland / XWayland / 嵌套）下**第一次点击就能弹**。
+
+    ## 自带的行为
+
+    悬停高亮、点击触发、点击别处/窗口失焦/Esc 关闭、↑↓ 选择、Enter 触发、贴边自动翻转。
+    ``items`` 的格式与 :func:`dsh_console.browser.context_menu_items` 一致：
+    ``(标签, id, 是否可用)``，``标签`` 与 ``id`` 都为空表示一条分隔线。
+    """
+
+    triggered = Signal(str)                 # 被点条目的 id
+
+    def __init__(self, parent: QWidget, items, theme, *, width: int = 236) -> None:
+        super().__init__(parent)
+        self._theme = theme
+        self.setObjectName("PopupMenu")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        surf = _col(theme, "surface", "bg")
+        border = _col(theme, "border")
+        self.setStyleSheet(
+            f"#PopupMenu {{ background: {surf}; border: 1px solid {border};"
+            f" border-radius: 8px; }}"
+        )
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(5, 5, 5, 5)
+        lay.setSpacing(1)
+        self._buttons: list[QPushButton] = []
+        for label, item_id, enabled in items:
+            if not label and not item_id:
+                line = QFrame(self)
+                line.setFixedHeight(1)
+                line.setStyleSheet(f"background: {border}; border: none;")
+                lay.addWidget(line)
+                continue
+            btn = QPushButton(label, self)
+            btn.setObjectName("PopupItem")
+            btn.setEnabled(bool(enabled))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton#PopupItem { text-align: left; padding: 5px 10px; border: none;"
+                f" background: transparent; color: {_col(theme, 'text')}; font-size: 12.5px;"
+                f" border-radius: 5px; }}"
+                f"QPushButton#PopupItem:hover {{ background: {_col(theme, 'hover', 'surface_alt')}; }}"
+                f"QPushButton#PopupItem:disabled {{ color: {_col(theme, 'dim', 'text_faint')}; }}"
+            )
+            btn.clicked.connect(lambda _c=False, i=item_id: self._fire(i))
+            lay.addWidget(btn)
+            self._buttons.append(btn)
+        self.setFixedWidth(width)
+        self.adjustSize()
+        self.hide()
+
+    # ---------------------------------------------------------------- 弹出与关闭
+    def popup(self, global_pos) -> None:
+        """在全局坐标处弹出（贴边时自动向左/向上翻转）。"""
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        pos: QPoint = parent.mapFromGlobal(global_pos)
+        w, h = self.width(), self.height()
+        x = min(max(0, pos.x()), max(0, parent.width() - w))
+        y = min(max(0, pos.y()), max(0, parent.height() - h))
+        self.move(x, y)
+        self.show()
+        self.raise_()
+        self.setFocus(Qt.FocusReason.PopupFocusReason)
+        win = self.window()
+        if win is not None:
+            win.installEventFilter(self)     # 点别处/失焦时关掉
+        if self._buttons:
+            first = next((b for b in self._buttons if b.isEnabled()), None)
+            if first is not None:
+                first.setFocus()
+
+    def close_menu(self) -> None:
+        win = self.window()
+        if win is not None:
+            win.removeEventFilter(self)
+        self.hide()
+        QTimer.singleShot(0, self.deleteLater)   # 别在自身信号里直接销毁
+
+    def _fire(self, item_id: str) -> None:
+        self.close_menu()
+        self.triggered.emit(item_id)
+
+    # ---------------------------------------------------------------- 交互
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt 命名
+        if event.type() == QEvent.Type.MouseButtonPress:
+            gp = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else None
+            if gp is not None and not self.geometry().contains(self.parentWidget().mapFromGlobal(gp)):
+                self.close_menu()
+        elif event.type() in (QEvent.Type.WindowDeactivate, QEvent.Type.ApplicationDeactivate):
+            self.close_menu()
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        key = event.key()
+        if key == Qt.Key.Key_Escape:
+            self.close_menu()
+            return
+        if key in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            cur = self.focusWidget()
+            enabled = [b for b in self._buttons if b.isEnabled()]
+            if enabled:
+                i = enabled.index(cur) if cur in enabled else -1
+                step = -1 if key in (Qt.Key.Key_Up, Qt.Key.Key_Backtab) else 1
+                enabled[(i + step) % len(enabled)].setFocus()
+            return
+        super().keyPressEvent(event)
+
 
 
 class Metric(QWidget):
