@@ -1084,13 +1084,21 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             # 位置要贴着「⋮」按钮：把它在**视图坐标系**里的位置算出来
             # （早先写死 80,60，菜单跑到左上角去了 —— 用户截图里就是这个问题）。
             try:
-                origin = anchor.mapToGlobal(QPoint(0, anchor.height()))
-                local = view.mapFromGlobal(origin)
-                x, y = local.x(), local.y()
+                bottom_right = anchor.mapToGlobal(QPoint(anchor.width(), anchor.height()))
+                local = view.mapFromGlobal(bottom_right)
+                # ⚠️ 要除以设备像素比：mapToGlobal/mapFromGlobal 给的是 **Qt 逻辑坐标**，
+                # 而菜单是在**页面**里按 CSS 像素定位的。高分屏（DPR=2）下不除这一下，
+                # 菜单会离按钮远一倍高度（用户截图：顶部没紧贴按钮底部，差的就是这个）。
+                # 右键那条路不受影响 —— 页面报上来的 clientX/clientY 本来就是 CSS 像素。
+                try:
+                    dpr = float(view.devicePixelRatioF()) or 1.0
+                except Exception:                        # noqa: BLE001
+                    dpr = 1.0
+                x, y = local.x() / dpr, local.y() / dpr
             except Exception:                            # noqa: BLE001
                 x, y = 80, 60
             view._ctx = {}
-            view._show_html_menu(max(0, x), max(0, y), items=payload)
+            view._show_html_menu(int(max(0, x)), int(max(0, y)), items=payload)
 
         def _close_current(self) -> None:
             """关掉当前标签（菜单项用；Ctrl+W 也走这里）。"""
