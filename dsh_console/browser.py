@@ -919,11 +919,9 @@ def main(argv: list[str] | None = None) -> int:
 
     i18n.prepare_environment()
     flags = [f for f in (args.extra_flags or "").split(";") if f.strip()]
-    # 显式选了 xcb 时，让 Chromium 也走 X11。否则会出现"Qt 用 xcb、Chromium 自己
-    # 认成 Wayland"的错配，表现就是**进程起来了、窗口不出来**（很难查的一类）。
-    if (os.environ.get("QT_QPA_PLATFORM") or "").startswith("xcb") \
-            and not any("ozone-platform" in f for f in flags):
-        flags.append("--ozone-platform=x11")
+    # ⚠️ 不要给 Chromium 传 --ozone-platform=x11：这个 QtWebEngine 构建里 x11 **不是**
+    # 合法的 ozone 平台（实测直接 FATAL: Invalid ozone platform: x11，进程起来、窗口不出）。
+    # 让 Chromium 自己按环境判断即可。
     apply_chromium_flags(flags)
 
     try:
@@ -955,9 +953,11 @@ def main(argv: list[str] | None = None) -> int:
     CACHE_SUBDIR.mkdir(parents=True, exist_ok=True)
 
     window, app = build_window(url, note, autostart=not args.no_start)
-    # Wayland 上窗口 show() 出来可能没有被合成器激活，此时菜单/弹窗抓不到输入
-    # （表现为必须先失去一次焦点）。这里显式抬升并激活一次作为兜底；
-    # 真正的解法见 main() 里切换到 XWayland 的那段。
+    # ⚠️ **这一行不能少**：曾经我的正则补丁把它替换掉了，结果"进程起来了、窗口不出现"
+    # ——应用进了事件循环，但窗口从未 show（两个平台都一样，极难查）。
+    window.show()
+    # show() 出来可能没有被合成器激活，此时菜单/弹窗抓不到输入（表现为必须先失去一次焦点）。
+    # 这里显式抬升并激活一次作为兜底。
     from PySide6.QtCore import QTimer as _QTimer
     _QTimer.singleShot(0, lambda w=window: (w.raise_(), w.activateWindow()))
 
