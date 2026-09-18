@@ -64,8 +64,10 @@ def inject(obj: dict) -> None:
         run_tool(["ydotool", "mousemove", "--absolute",
                   "-x", str(int(float(x) * W)), "-y", str(int(float(y) * H))])
         if kind == "click":
-            # 1=左键 2=右键 3=中键：ydotool click 收的是按键码
-            btn = {1: "0x1", 2: "0x2", 3: "0x4"}.get(int(obj.get("b") or 1), "0x1")
+            # ⚠️ ydotool click 收的是 **evdev 按键码**：BTN_LEFT=0x110、BTN_RIGHT=0x111、
+            # BTN_MIDDLE=0x112。早先传 0x1/0x2/0x3 是无效码 —— 命令"成功"但什么都不发生
+            # （排查了很久的"点击没反应"就是这个）。
+            btn = {1: "0x110", 2: "0x111", 3: "0x112"}.get(int(obj.get("b") or 1), "0x110")
             run_tool(["ydotool", "click", btn])
     elif kind == "wheel":
         dy = float(obj.get("dy") or 0)
@@ -75,7 +77,11 @@ def inject(obj: dict) -> None:
     elif kind == "text":
         text = str(obj.get("s") or "")
         if text:
-            run_tool(["wtype", "--", text])
+            # 先等一下再打字：焦点刚落定时立刻注入，开头几个字符会掉
+            # （实测："zhanghao@example.com" 只进去 ".com"）。用 wtype 自带的延迟参数
+            # 最稳（`-s` 是每次按键之间的间隔）。
+            time.sleep(0.15)
+            run_tool(["wtype", "-s", "30", "--", text])
     elif kind == "key":
         key = str(obj.get("k") or "")
         if key:
