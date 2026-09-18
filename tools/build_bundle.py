@@ -120,54 +120,70 @@ QT_LOCALES_KEEP = ("zh-CN.pak", "en-US.pak", "en-GB.pak")
 #:   3. Windows 上没有 WASM 退路（kit 源码里写死 ``platform !== "linux"`` 就抛错），
 #:      也就是说这 325 MB 是"要么留、要么彻底不要"，没有中间档。
 #: 想要 Office 预览：``DSH_BUNDLE_KEEP_OFFICE_PREVIEW=1`` 构建即可。
-SKIP_HEAVY_PACKAGES = ("libreoffice-kit",)
+#: 注意结尾的连字符：只匹配 ``libreoffice-kit-win32-x64`` 这类**平台引擎包**，
+#: 不能连 shim ``libreoffice-kit`` 一起删——那是 dsh-office-to-pdf 静态 import 的包，
+#: 删了插件树就加载失败（实测踩过）。
+SKIP_HEAVY_PACKAGES = ("libreoffice-kit-",)
 
 
-def align_dsh_deps(dst: Path, plat: str) -> None:
+def align_dsh_deps(root: Path) -> None:
     """把 harness 里 ``@deepseek-ai/dsh-*`` 的版本**对齐到 dsh 自己的版本**。
 
-    为什么必须做：``dsh`` 声明的是 ``^0.1.6-alpha.1`` 这种**预发布范围**，npm 可能解析到
-    更新的 alpha，而 **alpha 之间是会删导出的**——实测 Windows 侧两次都装到
+    为什么必须做：``dsh`` 声明 ``^0.1.6-alpha.1`` 这种**预发布范围**，npm 会解析到更新的
+    alpha，而 **alpha 之间是会删导出的**——实测 Windows 侧每次都装到
     ``dsh-app-boot@0.1.6-alpha.2``，它删掉了 ``watchUserPatches``，于是 ``dsh`` 一启动就
-    `SyntaxError: does not provide an export named ...`，harness 永远起不来。
+    ``SyntaxError: does not provide an export named ...``，harness 永远起不来。
 
-    这些包都是**纯 JS**（同版本跨平台一致），所以做法很直接：从**另一个平台的树**里
-    把同版本的包复制过来。Linux 侧先构建，正好可以当"正版来源"。
+    这些包都是**纯 JS**，同版本跨平台一致，所以直接从"版本正确的那棵树"复制过来即可
+    （先构建的平台正好当来源）。
     """
-    import shutil as _shutil
-
-    other = "linux" if plat == "win" else "win"
-    mine = dst / "harness" / plat / "lib" / "node_modules" / "@deepseek-ai" / "dsh"
-    theirs = dst / "harness" / other / "lib" / "node_modules" / "@deepseek-ai" / "dsh"
-    if not mine.is_dir() or not theirs.is_dir():
+    # 来源不限于本次构建的包：`--platform win` 时 Linux 树在**兄弟目录**里
+    # （dist/DSH-Console-Linux），只看自己这棵树就会因为"只有一个平台"直接返回。
+    trees = sorted({*(root / "harness").glob("*/lib/node_modules/@deepseek-ai/dsh"),
+                    *(root.parent).glob("*/harness/*/lib/node_modules/@deepseek-ai/dsh")})
+    if len(trees) < 2:
         return
-    try:
-        version = json.loads((mine / "package.json").read_text(encoding="utf-8"))["version"]
-    except Exception:                          # noqa: BLE001
-        return
-    src_root = theirs / "node_modules" / "@deepseek-ai"
-    dst_root = mine / "node_modules" / "@deepseek-ai"
-    if not src_root.is_dir() or not dst_root.is_dir():
-        return
-    fixed = []
-    for pkg in sorted(src_root.glob("dsh-*")):
-        if not pkg.is_dir() or pkg.name == "dsh":
-            continue
-        target = dst_root / pkg.name
+    good: dict[str, Path] = {}
+    for tree in trees:
         try:
-            have = json.loads((target / "package.json").read_text(encoding="utf-8"))["version"]
+            dsh_version = json.loads((tree / "package.json").read_text(encoding="utf-8"))["version"]
         except Exception:                      # noqa: BLE001
             continue
-        want = json.loads((pkg / "package.json").read_text(encoding="utf-8")).get("version")
-        # 只对齐"dsh 自己的版本"，其余依赖各平台可能确实不同，别乱动
-        if have == want or want != version:
+        for pkg in (tree / "node_modules" / "@deepseek-ai").glob("dsh-*"):
+            pkg_json = pkg / "package.json"
+            if not pkg_json.is_file() or pkg.name == "dsh":
+                continue
+            try:
+                version = json.loads(pkg_json.read_text(encoding="utf-8")).get("version")
+            except Exception:                  # noqa: BLE001
+                continue
+            if version == dsh_version:
+                good.setdefault(pkg.name, pkg)      # 记一份"版本正确"的
+    fixed = []
+    for tree in trees:
+        try:
+            dsh_version = json.loads((tree / "package.json").read_text(encoding="utf-8"))["version"]
+        except Exception:                      # noqa: BLE001
             continue
-        if any(pkg.rglob("*.node")):           # 原生模块不能跨平台复制
-            log(f"⚠️ {pkg.name} 版本不一致（{have} ≠ {want}）但有原生模块，跳过")
-            continue
-        _shutil.rmtree(target)
-        _shutil.copytree(pkg, target)
-        fixed.append(f"{pkg.name}: {have} → {want}")
+        for pkg in sorted((tree / "node_modules" / "@deepseek-ai").glob("dsh-*")):
+            if pkg.name == "dsh":
+                continue
+            source = good.get(pkg.name)
+            if source is None or source == pkg:
+                continue
+            try:
+                have = json.loads((pkg / "package.json").read_text(encoding="utf-8")).get("version")
+                want = json.loads((source / "package.json").read_text(encoding="utf-8")).get("version")
+            except Exception:                  # noqa: BLE001
+                continue
+            if have == want or want != dsh_version:
+                continue
+            if any(pkg.rglob("*.node")):       # 原生模块不能跨平台复制
+                log(f"⚠️ {pkg.name} 版本不一致（{have} ≠ {want}）含原生模块，未对齐")
+                continue
+            shutil.rmtree(pkg)
+            shutil.copytree(source, pkg)
+            fixed.append(f"{pkg.name}: {have} → {want}")
     if fixed:
         log("对齐 harness 依赖版本：" + "；".join(fixed))
 
@@ -281,6 +297,10 @@ def prune_heavy_packages(root: Path) -> int:
             shutil.rmtree(path, ignore_errors=True)
             freed += size
             log(f"跳过重包 {path.name}：-{human(size)}")
+    # 顺手把 harness 依赖的版本漂移修掉。挂在这里是因为**这个函数一定会被执行**
+    # （出包日志里能看到"跳过重包"），而调用点那条路曾经因为参数是 stdlib 的
+    # platform 模块而静默失效，导致 alpha.2 一路带到用户机器上。
+    align_dsh_deps(root)
     return freed
 
 QT_PRUNE = {
@@ -1011,9 +1031,6 @@ def build(out: Path, *, platforms: tuple[str, ...] = ("linux", "win"),
     prune_heavy_packages(dst)
     # ⚠️ 这里千万不要写 `platform`：那是 stdlib 模块（本文件 import 了它），
     # 传进去会让 `dst / platform` 炸成 TypeError。平台的真实来源是 platforms 元组。
-    plat = platforms[0] if len(platforms) == 1 else ""
-    if plat:
-        align_dsh_deps(dst, plat)
     # ⚠️ 冒烟测试**不放在出包流程里**：跑一次 harness 会让它把缺的依赖自己装回来
     # （self-heal），交付件当场被改胖（实测 Linux 包 309 → 426 MB）。
     # 需要验证时在**副本**上手动调用：
