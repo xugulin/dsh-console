@@ -107,10 +107,8 @@ QT_LOCALES_KEEP = ("zh-CN.pak", "en-US.pak", "en-GB.pak")
 #: 最后一环是**一整份 LibreOffice Windows 运行时（约 325 MB）**，它只服务一件事：
 #: harness Web 界面里预览 docx / xlsx / pptx（转成 PDF 再显示）。
 #:
-#: ⚠️ **只删引擎，不要删 `dsh-office-to-pdf`**：那个插件被写进了 dsh 自己的默认 profile
-#: （loader entry ``office-to-pdf``），包不在就 `failed to import loader entry
-#: office-to-pdf ... Cannot find package` → **整个插件树加载失败、harness 起不来**（实测）。
-#: 引擎则是**惰性解析**的：缺了只是"预览时报错"，启动完全不受影响（实测 B ✓）。
+#: 为什么连插件一起删：用户要的是"预览这个功能干净消失、不要一用就报错"。
+#: entry 由首次启动按已安装的包生成，所以删包 + 不带预生成 profile = 功能彻底不存在。
 #:
 #: 为什么默认删掉（用户明确要求 + 实测支持）：
 #:   1. 删掉后 harness **照常启动**——wine 实测给出 ``dsh web: http://127.0.0.1:8964/``；
@@ -123,7 +121,13 @@ QT_LOCALES_KEEP = ("zh-CN.pak", "en-US.pak", "en-GB.pak")
 #: 注意结尾的连字符：只匹配 ``libreoffice-kit-win32-x64`` 这类**平台引擎包**，
 #: 不能连 shim ``libreoffice-kit`` 一起删——那是 dsh-office-to-pdf 静态 import 的包，
 #: 删了插件树就加载失败（实测踩过）。
-SKIP_HEAVY_PACKAGES = ("libreoffice-kit-",)
+#: 连插件一起删：**预览功能彻底消失**，而不是"留着但一用就报错"。
+#: 曾经以为不能删——删了插件 harness 起不来（fail to import loader entry
+#: office-to-pdf）。后来查明那是**旧 profile 残留**：那条 entry 是首次启动时
+#: 按"已安装的包"生成到 home/.dsh/profiles/web/cordis.patch.yml 里的，
+#: 包不在、profile 又是新的，就根本不会生成（实测：全新 profile + 删包 →
+#: harness 干净启动，日志里零 office 引用 ✓）。
+SKIP_HEAVY_PACKAGES = ("libreoffice-kit-", "dsh-office-to-pdf")
 
 
 def align_dsh_deps(root: Path) -> None:
