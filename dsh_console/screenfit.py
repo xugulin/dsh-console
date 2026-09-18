@@ -91,14 +91,16 @@ def prefer_xwayland(env_var: str, *, default: str = "xcb") -> str:
     import os
 
     override = (os.environ.get(env_var) or "").strip()
+    if not override:
+        # ⚠️ **默认什么都不做**（opt-in）。曾经默认切过 xcb：菜单确实能弹了，但在用户的
+        # COSMIC/Wayland 桌面上出现了"浏览器进程起来了、**窗口不出现**"（实测反馈），
+        # 排查成本远高于"菜单多点一次"。功能优先，默认交给用户自己的
+        # QT_QPA_PLATFORM（常见写法 wayland;xcb 本来就能用）。
+        #     DSH_BROWSER_QPA=xcb   → 想用 XWayland 时显式打开
+        return (os.environ.get("QT_QPA_PLATFORM") or "").strip()
     if override:
         os.environ["QT_QPA_PLATFORM"] = override
         return override
-    qpa = (os.environ.get("QT_QPA_PLATFORM") or "").strip()
-    on_wayland = bool(os.environ.get("WAYLAND_DISPLAY")) or "wayland" in qpa
-    # 没有 XWayland（DISPLAY 为空）时不能切，否则 Qt 起不来
-    if not (on_wayland and os.environ.get("DISPLAY")):
-        return qpa or ""
     # ⚠️ 不要**替换**成单个 "xcb"：那样会把 Qt 的平台回退链拆掉——万一 DISPLAY 指向
     # 一个已失效的 XWayland（换过会话、Xwayland 崩过都很常见），Qt 会**直接起不来**，
     # 而不是退回 Wayland。Qt 的多值写法是"按顺序尝试"，所以写成 "xcb;wayland"：

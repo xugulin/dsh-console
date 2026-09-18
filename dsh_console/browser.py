@@ -919,6 +919,11 @@ def main(argv: list[str] | None = None) -> int:
 
     i18n.prepare_environment()
     flags = [f for f in (args.extra_flags or "").split(";") if f.strip()]
+    # 显式选了 xcb 时，让 Chromium 也走 X11。否则会出现"Qt 用 xcb、Chromium 自己
+    # 认成 Wayland"的错配，表现就是**进程起来了、窗口不出来**（很难查的一类）。
+    if (os.environ.get("QT_QPA_PLATFORM") or "").startswith("xcb") \
+            and not any("ozone-platform" in f for f in flags):
+        flags.append("--ozone-platform=x11")
     apply_chromium_flags(flags)
 
     try:
