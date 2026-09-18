@@ -100,15 +100,158 @@ QT_TRANSLATIONS_KEEP = ("qtbase_zh_CN", "qtbase_en", "qtwebengine_zh_CN", "qtweb
 #: 我们只需要中文和英文这两份（各约 0.5 MB）。
 QT_LOCALES_KEEP = ("zh-CN.pak", "en-US.pak", "en-GB.pak")
 
-#: 打包时**整个跳过**的重家伙：LibreOffice 运行时（Windows 包约 330 MB）。
+#: 打包时**整个跳过**的"Office 预览链"：
 #:
-#: 它是 ``@deepseek-ai/dsh`` 的**传递依赖**（不在 dsh 的 dependencies 里），只被文档预览
-#: 插件用来把 Office 文档转成预览图。三件事让它值得砍：
-#:   1. Linux 包**本来就没有**它（上游没发 Linux 版）——说明功能是可选降级的；
-#:   2. v1.0~v1.1 发布的 Windows 包也没有它（353 MB），用户没反馈过问题；
-#:   3. 它一占就是 330 MB，把 Windows 包从 350 MB 撑到 470 MB。
-#: 想要完整预览功能：``DSH_BUNDLE_KEEP_LIBREOFFICE=1`` 构建即可。
+#:   ``dsh-web-app`` → ``dsh-office-to-pdf`` → ``libreoffice-kit`` → ``libreoffice-kit-win32-x64``
+#:
+#: 最后一环是**一整份 LibreOffice Windows 运行时（约 325 MB）**，它只服务一件事：
+#: harness Web 界面里预览 docx / xlsx / pptx（转成 PDF 再显示）。
+#:
+#: ⚠️ **只删引擎，不要删 `dsh-office-to-pdf`**：那个插件被写进了 dsh 自己的默认 profile
+#: （loader entry ``office-to-pdf``），包不在就 `failed to import loader entry
+#: office-to-pdf ... Cannot find package` → **整个插件树加载失败、harness 起不来**（实测）。
+#: 引擎则是**惰性解析**的：缺了只是"预览时报错"，启动完全不受影响（实测 B ✓）。
+#:
+#: 为什么默认删掉（用户明确要求 + 实测支持）：
+#:   1. 删掉后 harness **照常启动**——wine 实测给出 ``dsh web: http://127.0.0.1:8964/``；
+#:   2. 本机这份正在使用的系统 harness 压根**没有** ``dsh-office-to-pdf`` 与
+#:      ``libreoffice-kit``（245 个包里就没有），一切功能正常——说明这条链是
+#:      **惰性加载**的，缺了只是"没有 Office 预览"，不会崩；
+#:   3. Windows 上没有 WASM 退路（kit 源码里写死 ``platform !== "linux"`` 就抛错），
+#:      也就是说这 325 MB 是"要么留、要么彻底不要"，没有中间档。
+#: 想要 Office 预览：``DSH_BUNDLE_KEEP_OFFICE_PREVIEW=1`` 构建即可。
 SKIP_HEAVY_PACKAGES = ("libreoffice-kit",)
+
+
+def align_dsh_deps(dst: Path, plat: str) -> None:
+    """把 harness 里 ``@deepseek-ai/dsh-*`` 的版本**对齐到 dsh 自己的版本**。
+
+    为什么必须做：``dsh`` 声明的是 ``^0.1.6-alpha.1`` 这种**预发布范围**，npm 可能解析到
+    更新的 alpha，而 **alpha 之间是会删导出的**——实测 Windows 侧两次都装到
+    ``dsh-app-boot@0.1.6-alpha.2``，它删掉了 ``watchUserPatches``，于是 ``dsh`` 一启动就
+    `SyntaxError: does not provide an export named ...`，harness 永远起不来。
+
+    这些包都是**纯 JS**（同版本跨平台一致），所以做法很直接：从**另一个平台的树**里
+    把同版本的包复制过来。Linux 侧先构建，正好可以当"正版来源"。
+    """
+    import shutil as _shutil
+
+    other = "linux" if plat == "win" else "win"
+    mine = dst / "harness" / plat / "lib" / "node_modules" / "@deepseek-ai" / "dsh"
+    theirs = dst / "harness" / other / "lib" / "node_modules" / "@deepseek-ai" / "dsh"
+    if not mine.is_dir() or not theirs.is_dir():
+        return
+    try:
+        version = json.loads((mine / "package.json").read_text(encoding="utf-8"))["version"]
+    except Exception:                          # noqa: BLE001
+        return
+    src_root = theirs / "node_modules" / "@deepseek-ai"
+    dst_root = mine / "node_modules" / "@deepseek-ai"
+    if not src_root.is_dir() or not dst_root.is_dir():
+        return
+    fixed = []
+    for pkg in sorted(src_root.glob("dsh-*")):
+        if not pkg.is_dir() or pkg.name == "dsh":
+            continue
+        target = dst_root / pkg.name
+        try:
+            have = json.loads((target / "package.json").read_text(encoding="utf-8"))["version"]
+        except Exception:                      # noqa: BLE001
+            continue
+        want = json.loads((pkg / "package.json").read_text(encoding="utf-8")).get("version")
+        # 只对齐"dsh 自己的版本"，其余依赖各平台可能确实不同，别乱动
+        if have == want or want != version:
+            continue
+        if any(pkg.rglob("*.node")):           # 原生模块不能跨平台复制
+            log(f"⚠️ {pkg.name} 版本不一致（{have} ≠ {want}）但有原生模块，跳过")
+            continue
+        _shutil.rmtree(target)
+        _shutil.copytree(pkg, target)
+        fixed.append(f"{pkg.name}: {have} → {want}")
+    if fixed:
+        log("对齐 harness 依赖版本：" + "；".join(fixed))
+
+
+def verify_harness_starts(dst: Path, plat: str, *, timeout: int = 150) -> None:
+    """**出包前的冒烟测试**：真的把 harness 拉起来，确认它能给出监听地址。
+
+    为什么必须有这一步（血的教训）：v1.1.2/v1.1.3 发出的 Windows 包，harness
+    **根本起不来**——``dsh`` 声明 ``@deepseek-ai/dsh-app-boot: ^0.1.6-alpha.1``，
+    npm 解析到了 alpha.2，而 alpha.2 删掉了 ``watchUserPatches`` 这个导出，
+    于是启动即 ``SyntaxError``，用户点「启动内置 harness」永远停在"启动中…"。
+
+    这类"装得上、跑不起来"的问题：npm 成功、文件齐全、体积正常，
+    **只有真的跑一次才看得见**。失败就把日志尾巴打出来并**中止出包**。
+    """
+    import subprocess
+
+    run = dst / "run"
+    run.mkdir(parents=True, exist_ok=True)
+    log_path = run / "smoke-web.log"
+    if log_path.exists():
+        log_path.unlink()
+
+    if plat == "win":
+        node = dst / "runtime" / "win" / "node" / "node.exe"
+        entry = (dst / "harness" / "win" / "lib" / "node_modules" / "@deepseek-ai"
+                 / "dsh" / "lib" / "bin.js")
+        if shutil.which("wine") is None:
+            log("⚠️ 冒烟测试跳过：本机没有 wine，验不了 Windows 侧 harness")
+            return
+        argv = ["wine", str(node), str(entry), "web", "--no-open", "--port", "8977"]
+        env_extra = {"WINEDEBUG": "-all", "WINEDLLOVERRIDES": "mscoree,mshtml="}
+    else:
+        node = dst / "runtime" / "linux" / "node" / "bin" / "node"
+        entry = (dst / "harness" / "linux" / "lib" / "node_modules" / "@deepseek-ai"
+                 / "dsh" / "lib" / "bin.js")
+        argv = [str(node), str(entry), "web", "--no-open", "--port", "8977"]
+        env_extra = {}
+    if not node.is_file() or not entry.is_file():
+        log("⚠️ 冒烟测试跳过：node/harness 不在预期位置")
+        return
+
+    env = dict(os.environ)
+    env.update(env_extra)
+    env["HOME"] = str(dst / "home")
+    env.setdefault("USERPROFILE", str(dst / "home"))
+    env["DSH_HOME"] = str(dst / "home" / ".dsh")
+    env["XDG_CONFIG_HOME"] = str(dst / "home" / ".config")
+    log(f"冒烟测试：启动 harness（{platform}，端口 8977）…")
+    with open(log_path, "wb") as out:
+        proc = subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT, env=env,
+                                cwd=str(dst))
+    ok = False
+    try:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(2)
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+            if "http://127.0.0.1" in text:
+                ok = True
+                break
+            if any(p in text for p in ("SyntaxError", "ERR_MODULE_NOT_FOUND", "EADDRINUSE")):
+                break
+            if proc.poll() is not None:
+                break
+    finally:
+        for closer in (proc.terminate, proc.kill):
+            try:
+                closer()
+                proc.wait(timeout=10)
+                break
+            except Exception:                  # noqa: BLE001
+                continue
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+    if not ok and "EADDRINUSE" in text:
+        log("⚠️ 冒烟测试跳过：端口 8977 被占用（本机已有 harness 在跑）")
+        return
+    if ok:
+        log("✓ 冒烟测试通过：harness 能启动并给出监听地址")
+        return
+    log("✗ 冒烟测试失败：harness 起不来。日志尾部：")
+    for line in text.strip().splitlines()[-8:]:
+        log(f"    {line}")
+    raise RuntimeError("harness 冒烟测试失败——这样的包发出去，用户只会看到「启动中…」")
 
 
 def prune_heavy_packages(root: Path) -> int:
@@ -126,7 +269,8 @@ def prune_heavy_packages(root: Path) -> int:
     """
     import os
 
-    if not os.environ.get("DSH_BUNDLE_DROP_LIBREOFFICE"):
+    if os.environ.get("DSH_BUNDLE_KEEP_OFFICE_PREVIEW"):
+        log("保留 Office 预览链（DSH_BUNDLE_KEEP_OFFICE_PREVIEW=1，约 +325 MB）")
         return 0
     freed = 0
     for pattern in SKIP_HEAVY_PACKAGES:
@@ -865,6 +1009,16 @@ def build(out: Path, *, platforms: tuple[str, ...] = ("linux", "win"),
     build_harness(dst, version=_dsh_version(), node_version=node_version,
                   platforms=platforms)
     prune_heavy_packages(dst)
+    # ⚠️ 这里千万不要写 `platform`：那是 stdlib 模块（本文件 import 了它），
+    # 传进去会让 `dst / platform` 炸成 TypeError。平台的真实来源是 platforms 元组。
+    plat = platforms[0] if len(platforms) == 1 else ""
+    if plat:
+        align_dsh_deps(dst, plat)
+    # ⚠️ 冒烟测试**不放在出包流程里**：跑一次 harness 会让它把缺的依赖自己装回来
+    # （self-heal），交付件当场被改胖（实测 Linux 包 309 → 426 MB）。
+    # 需要验证时在**副本**上手动调用：
+    #   python -c "import sys;sys.path.insert(0,'tools');import build_bundle as B;    #              from pathlib import Path;B.verify_harness_starts(Path('/tmp/copy'),'win')"
+
     build_profile(dst)
     build_home_skeleton(dst, platforms)
     build_icons(dst)
