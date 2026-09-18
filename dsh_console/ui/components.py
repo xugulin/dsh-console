@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import i18n
 from .. import pricing
 from ..themes import Theme
 
@@ -195,7 +196,10 @@ class _TableModel(QAbstractTableModel):
             return None
         if role == Qt.DisplayRole:
             row = self._rows[r]
-            return row[c] if c < len(row) else ""
+            # 表格里的**文字**（"已启用"、"未安装"、列名…）也走翻译表：
+            # 表头在 headerData 里翻，单元格在这里翻——两处不在同一个函数里，
+            # 之前只翻了控件、漏了表格内容（实测截图：英文界面里表头/状态还是中文）。
+            return i18n.replace_all(row[c]) if c < len(row) else ""
         if role == Qt.CheckStateRole and self._check_col == c:
             return Qt.Checked if (r < len(self._checks) and self._checks[r]) else Qt.Unchecked
         if role == Qt.TextAlignmentRole:
@@ -226,7 +230,9 @@ class _TableModel(QAbstractTableModel):
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):  # noqa: N802
         if orientation == Qt.Horizontal and role == Qt.DisplayRole:
-            return self._headers[section] if section < len(self._headers) else ""
+            if section < len(self._headers):
+                return i18n.replace_all(self._headers[section])
+            return ""
         return None
 
     # --- 便捷接口

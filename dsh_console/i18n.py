@@ -53,6 +53,11 @@ _CHROMIUM = {LANG_ZH: "zh-CN", LANG_EN: "en-US"}
 
 #: 中文原文 → English。**键要和代码里的字符串一字不差。**
 _EN: dict[str, str] = {
+    "（查不到）": "(unavailable)",
+    "未查到 API key": "No API key found",
+    "标签": "tag",
+    "包含": "in",
+    "关键字筛选（包含 / 说明 / 标签，本地匹配）…": "Filter by keyword (name / description / tag, matched locally)…",
     "合计": "Total",
     "小计": "Subtotal",
     "峰值": "Peak",
@@ -1343,7 +1348,7 @@ def translate_widgets(root) -> int:
     全覆盖。懒加载的页面在它第一次显示（``activate()``）时再走一遍即可。
     """
     from PySide6.QtWidgets import (
-        QAbstractButton, QComboBox, QGroupBox, QLabel, QTabWidget, QTableWidget,
+        QAbstractButton, QComboBox, QGroupBox, QLabel, QLineEdit, QTabWidget, QTableWidget,
         QTableView, QWidget,
     )
 
@@ -1363,7 +1368,11 @@ def translate_widgets(root) -> int:
                 changed += _tr_in_place(act, act.toolTip, act.setToolTip, "atip")
         except Exception:                    # noqa: BLE001
             pass
-        if isinstance(w, QLabel):
+        if isinstance(w, QLineEdit):
+            # 占位提示（"搜索插件（留空=按排名列出全部）…"）也是界面文案；
+            # 之前漏了 QLineEdit.placeholderText（实测：英文界面里输入框还是中文）。
+            changed += _tr_in_place(w, w.placeholderText, w.setPlaceholderText, "ph")
+        elif isinstance(w, QLabel):
             changed += _tr_in_place(w, w.text, w.setText, "text")
         elif isinstance(w, QAbstractButton):
             changed += _tr_in_place(w, w.text, w.setText, "text")
@@ -1393,6 +1402,11 @@ def translate_widgets(root) -> int:
                     w.setTabText(i, new)
                     changed += 1
         if isinstance(w, (QTableView, QTableWidget)):
+            # 表格内容由模型（components._TableModel）按当前语言给出，这里让视图重画
+            try:
+                w.viewport().update()
+            except Exception:            # noqa: BLE001
+                pass
             hh, vh = w.horizontalHeader(), w.verticalHeader()
             for i in range(w.model().columnCount() if w.model() else 0):
                 item = hh.model().headerData(i, Qt.Horizontal) if hh.model() else None
@@ -1409,6 +1423,31 @@ def translate_widgets(root) -> int:
                         w.model().setHeaderData(i, Qt.Vertical, new)
                         changed += 1
     return changed
+
+
+def duration(days: int = 0, hours: int = 0, minutes: int = 0) -> str:
+    """按时长**整串**拼出来：中文 ``3 天 5 小时18分`` / 英文 ``3d 5h 18m``。
+
+    为什么要专门一个函数：原来是在 sysinfo 里把 ``f"{h} 小时"``、``f"{m} 分"`` 拼起来，
+    运行时得到的是 ``"5 小时18分"``——**任何"整串模板"都对不上**，于是英文界面里
+    残留中文（实测截图：Uptime 显示 "5 小时18m"）。时长这种"由代码拼出来、又要跟着
+    语言变"的文案，就得在拼的时候问语言，而不是拼完再翻译。
+    """
+    if is_en():
+        bits = []
+        if days:
+            bits.append(f"{days}d")
+        if hours or days:
+            bits.append(f"{hours}h")
+        bits.append(f"{minutes}m")
+        return " ".join(bits)
+    bits = []
+    if days:
+        bits.append(f"{days} 天")
+    if hours or days:
+        bits.append(f"{hours} 小时")
+    bits.append(f"{minutes}分")
+    return "".join(bits)
 
 
 def chromium_lang(lang: str | None = None) -> str:

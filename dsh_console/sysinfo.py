@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import i18n
 from . import subproc
 
 
@@ -402,13 +403,8 @@ class SysInfo:
         d, rem = divmod(s, 86400)
         h, rem = divmod(rem, 3600)
         m, _ = divmod(rem, 60)
-        parts = []
-        if d:
-            parts.append(f"{d} 天")
-        if h or d:
-            parts.append(f"{h} 小时")
-        parts.append(f"{m} 分")
-        return "".join(parts)
+        # 交给 i18n 按当前语言拼（中文 "3 天 5 小时18分" / 英文 "3d 5h 18m"）
+        return i18n.duration(days=d, hours=h, minutes=m)
 
 
 def _dir_size(path: Path, limit: int = 400_000) -> int:

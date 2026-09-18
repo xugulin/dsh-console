@@ -112,11 +112,21 @@ SKIP_HEAVY_PACKAGES = ("libreoffice-kit",)
 
 
 def prune_heavy_packages(root: Path) -> int:
-    """删掉 :data:`SKIP_HEAVY_PACKAGES` 里那些"整包跳过"的依赖，返回释放的字节数。"""
+    """删掉 :data:`SKIP_HEAVY_PACKAGES` 里那些"整包跳过"的依赖，返回释放的字节数。
+
+    ⚠️ **默认不删**（改成 opt-in 了，教训在下面）：
+    v1.1.2 为了把 Windows 包从 470 MB 压到 357 MB，默认删掉了
+    ``@deepseek-ai/libreoffice-kit-win32-x64``（325 MB 的 LibreOffice 运行时）。
+    结果 Windows 上 **harness 起不来**（实测反馈："DSH 控制台无法启动 Harness"）——
+    它是**运行时真的会被 require 到**的依赖，不是"只有预览时才用"的可选件。
+    现在改成：默认**保留**，要瘦身得显式设 ``DSH_BUNDLE_DROP_LIBREOFFICE=1``，
+    并且自己确认 harness 还能起来。
+
+    教训：包体积是"体验问题"，功能是"能不能用"——不确定依赖是否可选时，先保功能。
+    """
     import os
 
-    if os.environ.get("DSH_BUNDLE_KEEP_LIBREOFFICE"):
-        log("保留 LibreOffice 运行时（DSH_BUNDLE_KEEP_LIBREOFFICE=1）")
+    if not os.environ.get("DSH_BUNDLE_DROP_LIBREOFFICE"):
         return 0
     freed = 0
     for pattern in SKIP_HEAVY_PACKAGES:
