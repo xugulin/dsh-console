@@ -43,7 +43,7 @@ from pathlib import Path
 from . import i18n
 from . import browser_theme as bt
 from .screenfit import apply_screen_fit, prefer_xwayland
-from .ui.components import PopupMenu
+from .ui.components import PopupMenu, _col
 from . import config as console_config
 
 #: profile 与缓存的落点。便携模式下 HOME 已被启动器指到包内，所以自动落在包里。
@@ -388,6 +388,32 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             return
         QDesktopServices.openUrl(QUrl(f"https://fanyi.baidu.com/#auto/zh/{quote(text)}"))
 
+    class _BrowserPage(QWebEnginePage):
+        """接管 dsh-menu:// 哨兵地址 —— 网页内菜单的点击就是这样回传出来的。
+
+        菜单画在**页面 DOM** 里（见 _BrowserView._show_html_menu），条目点击时把
+        location 指到 ``dsh-menu://<id>``；这里拦下它、执行动作、**阻止真正的导航**。
+        这样整条交互都在 Chromium 内部，不创建任何 Qt 控件/原生弹窗 ——
+        前几轮踩的坑（xdg_popup 需要输入 serial、事件过滤器里的销毁竞态）一个都不沾。
+        """
+
+        def __init__(self, profile, parent, on_menu_click) -> None:
+            super().__init__(profile, parent)
+            self._on_menu_click = on_menu_click
+
+        def acceptNavigationRequest(self, url, nav_type, is_main_frame):  # noqa: N802
+            target = url.toString()
+            if target.startswith("dsh-menu://"):
+                from urllib.parse import unquote
+
+                try:
+                    self._on_menu_click(unquote(target[len("dsh-menu://"):]))
+                except Exception as exc:                 # noqa: BLE001
+                    print(f"[html-menu] 动作失败：{type(exc).__name__}: {exc}",
+                          file=sys.stderr, flush=True)
+                return False                             # 拦下，不做导航
+            return super().acceptNavigationRequest(url, nav_type, is_main_frame)
+
     class _BrowserView(QWebEngineView):
         """带**中文右键菜单**的 WebEngine 视图。
 
@@ -472,6 +498,87 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
                 if hasattr(page.WebAction, "CopyImageToClipboard"):
                     page.triggerAction(page.WebAction.CopyImageToClipboard)
 
+        #: 画在页面里的菜单。**不创建任何 Qt 控件**，所以不受合成器/事件循环影响。
+        _HTML_MENU_JS = """
+        (function () {
+          var ID = 'dsh-ctx-menu';
+          var old = document.getElementById(ID);
+          if (old) { old.remove(); }
+          var items = %(items)s, x = %(x)d, y = %(y)d;
+          var d = document.createElement('div');
+          d.id = ID;
+          d.setAttribute('data-dsh', 'ctx-menu');
+          d.style.cssText = 'position:fixed;z-index:2147483647;left:' + x + 'px;top:' + y + 'px;'
+            + 'background:%(surface)s;border:1px solid %(border)s;border-radius:8px;padding:5px;'
+            + 'min-width:190px;max-width:320px;box-shadow:0 10px 30px rgba(0,0,0,.45);'
+            + 'font:13px/1.55 system-ui,-apple-system,"Segoe UI","Noto Sans CJK SC",sans-serif;'
+            + 'color:%(text)s;user-select:none';
+          items.forEach(function (it) {
+            if (!it[0]) {
+              var hr = document.createElement('div');
+              hr.style.cssText = 'height:1px;background:%(border)s;margin:4px 6px';
+              d.appendChild(hr);
+              return;
+            }
+            var b = document.createElement('div');
+            b.textContent = it[0];
+            b.style.cssText = 'padding:5px 10px;border-radius:5px;white-space:nowrap;'
+              + 'overflow:hidden;text-overflow:ellipsis;cursor:' + (it[2] ? 'pointer' : 'default')
+              + ';opacity:' + (it[2] ? '1' : '.45');
+            if (it[2]) {
+              b.addEventListener('mouseenter', function () { b.style.background = '%(hover)s'; });
+              b.addEventListener('mouseleave', function () { b.style.background = 'transparent'; });
+              b.addEventListener('click', function (ev) {
+                ev.preventDefault(); ev.stopPropagation();
+                location.href = 'dsh-menu://' + encodeURIComponent(it[1]);
+              });
+            }
+            d.appendChild(b);
+          });
+          var px = Math.min(x, Math.max(0, window.innerWidth - d.offsetWidth - 8));
+          var py = Math.min(y, Math.max(0, window.innerHeight - d.offsetHeight - 8));
+          d.style.left = (d.offsetWidth > window.innerWidth - 16 ? 8 : px) + 'px';
+          d.style.top = py + 'px';
+          document.body.appendChild(d);
+          function close() {
+            if (d.parentNode) { d.remove(); }
+            document.removeEventListener('mousedown', onDown, true);
+            document.removeEventListener('keydown', onKey, true);
+            window.removeEventListener('blur', close);
+          }
+          function onDown(ev) { if (!d.contains(ev.target)) { close(); } }
+          function onKey(ev) { if (ev.key === 'Escape') { close(); } }
+          document.addEventListener('mousedown', onDown, true);
+          document.addEventListener('keydown', onKey, true);
+          window.addEventListener('blur', close);
+        })();
+        """
+
+        def _show_html_menu(self, pos_x: int, pos_y: int, ctx: dict) -> None:
+            """把右键菜单画进当前页面（纯 DOM）。"""
+            import json as _json
+
+            items = [
+                [i18n.tr(label), act_id, bool(enabled)]
+                for label, act_id, enabled in context_menu_items(
+                    editable=ctx["editable"], has_selection=ctx["selected"],
+                    link_url=ctx["link_url"], media_is_image=ctx["is_image"],
+                    media_url=ctx["media_url"])
+            ]
+            try:
+                theme = getattr(self._owner, "theme", None) or bt.resolve(*current_choice())
+            except Exception:                            # noqa: BLE001
+                theme = _FallbackTheme()
+            js = self._HTML_MENU_JS % {
+                "items": _json.dumps(items, ensure_ascii=False),
+                "x": int(pos_x), "y": int(pos_y),
+                "surface": _col(theme, "surface", "bg"),
+                "border": getattr(theme, "border", "#3a3a42"),
+                "text": getattr(theme, "text", "#e8e8ea"),
+                "hover": _col(theme, "hover", "surface_alt"),
+            }
+            self.page().runJavaScript(js)
+
         def build_menu(self):
             """拼出**窗口内浮层菜单**（PopupMenu）。
 
@@ -514,8 +621,24 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             # 说明"QWidget + 事件过滤器 + 在合成器里反复弹出"这条路在该环境下不稳。
             # **可用性优先**：默认退回 Qt 自带菜单（Wayland 下第一次点击可能要多点一次，
             # 但不会崩）；想把自绘浮层要回来：DSH_BROWSER_MENU=overlay。
-            if (os.environ.get("DSH_BROWSER_MENU") or "").strip().lower() != "overlay":
+            mode = (os.environ.get("DSH_BROWSER_MENU") or "html").strip().lower()
+            if mode == "qt":
                 super().contextMenuEvent(event)
+                return
+            if mode == "none":
+                event.accept()
+                return
+            if mode == "html":
+                # 默认：菜单画在页面里 —— 不碰 Qt 控件/原生弹窗，最稳。
+                try:
+                    ctx = self._menu_context()
+                    self._ctx = ctx
+                    pos = event.position().toPoint()
+                    self._show_html_menu(pos.x(), pos.y(), ctx)
+                except Exception as exc:                 # noqa: BLE001
+                    print(f"[html-menu] 失败：{type(exc).__name__}: {exc}",
+                          file=sys.stderr, flush=True)
+                event.accept()
                 return
             # ⚠️ **右键绝不能把浏览器带崩**：以前这里是裸调用，一旦菜单构建或弹出抛异常，
             # PySide6 在虚函数里抛异常会直接终止进程（用户看到的就是"一右键就崩"）。
@@ -811,7 +934,7 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
         # ---------------------------------------------------------- 标签
         def add_tab(self, url: str | None = None):
             view = _BrowserView(self)          # 自定义右键菜单：Qt 默认那份是英文
-            view.setPage(QWebEnginePage(self._profile, view))
+            view.setPage(_BrowserPage(self._profile, view, view._run_action))
             view.urlChanged.connect(lambda _u, v=view: self._on_url_changed(v))
             view.titleChanged.connect(lambda t, v=view: self._on_title(t, v))
             view.loadStarted.connect(lambda: self.lbl_state.setText("加载中…"))
