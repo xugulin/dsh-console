@@ -179,7 +179,13 @@ class PopupMenu(QWidget):
         self.setFocus(Qt.FocusReason.PopupFocusReason)
         win = self.window()
         if win is not None:
-            win.installEventFilter(self)     # 点别处/失焦时关掉
+            win.installEventFilter(self)     # 窗口失活之类的窗口级事件
+        # ⚠️ **必须同时装在 QApplication 上**：点击落在子控件（网页视图、按钮…）上时，
+        # 事件只发给那个子控件，**不会**经过窗口对象 → 只装窗口的话"点外面不关闭"
+        # （实测反馈）。装在 app 上才能看到所有点击。
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         if self._buttons:
             first = next((b for b in self._buttons if b.isEnabled()), None)
             if first is not None:
@@ -191,6 +197,9 @@ class PopupMenu(QWidget):
         win = self.window()
         if win is not None:
             win.removeEventFilter(self)
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         self.hide()
         QTimer.singleShot(0, self.deleteLater)   # 别在自身信号里直接销毁
 
@@ -200,12 +209,27 @@ class PopupMenu(QWidget):
 
     # ---------------------------------------------------------------- 交互
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt 命名
-        if event.type() == QEvent.Type.MouseButtonPress:
-            gp = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else None
-            if gp is not None and not self.geometry().contains(self.parentWidget().mapFromGlobal(gp)):
+        etype = event.type()
+        if etype == QEvent.Type.MouseButtonPress:
+            gp = None
+            if hasattr(event, "globalPosition"):
+                try:
+                    gp = event.globalPosition().toPoint()
+                except Exception:            # noqa: BLE001
+                    gp = None
+            if gp is not None:
+                parent = self.parentWidget()
+                local = parent.mapFromGlobal(gp) if parent is not None else gp
+                if not self.geometry().contains(local):
+                    self.close_menu()
+        elif etype in (QEvent.Type.WindowDeactivate, QEvent.Type.ApplicationDeactivate,
+                       QEvent.Type.Wheel, QEvent.Type.KeyPress):
+            if etype == QEvent.Type.KeyPress and event.key() != Qt.Key.Key_Escape:
+                pass                          # 别的按键不关（键盘导航要用）
+            elif etype == QEvent.Type.KeyPress:
                 self.close_menu()
-        elif event.type() in (QEvent.Type.WindowDeactivate, QEvent.Type.ApplicationDeactivate):
-            self.close_menu()
+            else:
+                self.close_menu()
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
