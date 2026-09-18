@@ -314,8 +314,16 @@ def context_menu_items(*, editable: bool = False, has_selection: bool = False,
                   ("复制", "copy", has_selection), ("粘贴", "paste", True),
                   ("全选", "select_all", True)]
     elif has_selection:
-        items += [("", "", False), ("复制", "copy", True), ("全选", "select_all", True)]
-    items += [("", "", False), ("另存为…", "save_page", True), ("打印…", "print", True),
+        # 选中文字时也要给全一套（实测反馈：以前这里只有"复制/全选"，
+        # 用户找不到粘贴、翻译、打开链接）。粘贴对非输入区是**无害的空操作**，
+        # 但"菜单里没有"比"点了没反应"更让人困惑，所以保留它。
+        items += [("", "", False), ("复制", "copy", True), ("粘贴", "paste", True),
+                  ("翻译选中文字", "translate_selection", True), ("全选", "select_all", True)]
+    if link_url:
+        items += [("", "", False), ("在系统浏览器中打开链接", "open_link_system", True)]
+    items += [("", "", False),
+              ("在系统浏览器中打开此页", "open_page_system", True),
+              ("另存为…", "save_page", True), ("打印…", "print", True),
               ("查看网页源代码", "view_source", True), ("检查元素", "inspect", True)]
     return items
 
@@ -335,6 +343,32 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
     )
 
     from . import gui as shell
+
+    def _open_external(url: str) -> None:
+        """把地址交给系统浏览器（内置浏览器打不开/不想开的时候用）。"""
+        if not url:
+            return
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        QDesktopServices.openUrl(QUrl(url))
+
+    def _translate(text: str) -> None:
+        """翻译选中文字。
+
+        用**百度翻译**而不是 Google：本项目主要面向中文用户，Google 翻译在境内不通。
+        地址形如 ``https://fanyi.baidu.com/#auto/zh/<文本>`` —— 打开就带着原文，
+        省得用户再粘贴一次。
+        """
+        from urllib.parse import quote
+
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        text = (text or "").strip()
+        if not text:
+            return
+        QDesktopServices.openUrl(QUrl(f"https://fanyi.baidu.com/#auto/zh/{quote(text)}"))
 
     class _BrowserView(QWebEngineView):
         """带**中文右键菜单**的 WebEngine 视图。
@@ -362,6 +396,14 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
             req = self._request()
             editable = bool(getattr(req, "isContentEditable", lambda: False)())
             selected = bool(getattr(req, "selectedText", lambda: "")())
+            if not selected:
+                # 有些情况下 contextMenuData 里拿不到选中文本（版本/时序差异），
+                # 而 page().hasSelection() 才是权威——漏了它就会"选中了却没有复制"
+                # （实测反馈）。两者取或。
+                try:
+                    selected = bool(page.hasSelection())
+                except Exception:            # noqa: BLE001
+                    pass
             link = getattr(req, "linkUrl", lambda: None)()
             link_url = link.toString() if link is not None else ""
             media = getattr(req, "mediaType", lambda: None)()
@@ -405,6 +447,16 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
                     text = link_url if act_id == "copy_link" else media_url
                     act.triggered.connect(
                         lambda _c=False, t=text: QApplication.clipboard().setText(t))
+                elif act_id == "translate_selection":
+                    text = (getattr(req, "selectedText", lambda: "")() or "").strip()
+                    act.triggered.connect(
+                        lambda _c=False, t=text: self._translate(t))
+                elif act_id == "open_link_system":
+                    act.triggered.connect(
+                        lambda _c=False, u=link_url: _open_external(u))
+                elif act_id == "open_page_system":
+                    act.triggered.connect(
+                        lambda _c=False: _open_external(self.url().toString()))
                 elif act_id == "copy_image":
                     act.triggered.connect(
                         lambda _c=False: page.triggerAction(page.WebAction.CopyImageToClipboard)
@@ -858,6 +910,14 @@ def main(argv: list[str] | None = None) -> int:
     # **必须在建 QApplication 之前**：QtWebEngine 只在初始化时读这个变量。
     # 先让 i18n 把 ``--lang=zh-CN``（或 en-US）追加进去——内置浏览器的界面语言
     # 就是这么定的；用户手动给的 --extra-flags 排在它后面，仍然可以覆盖。
+    # ⚠️ **Wayland 下的弹窗/菜单抓不到输入**：窗口 show() 出来后如果没有被合成器
+    # 激活，右键菜单和工具栏菜单会"点了没反应"，用户必须先点别处、再点回来才行
+    # （实测反馈）。走 XWayland（xcb）能绕开这一整套 xdg-activation 的时序问题。
+    # 只在"Wayland 且有 XWayland 可用、用户又没自己指定平台"时才切，尊重用户设置。
+    if not os.environ.get("QT_QPA_PLATFORM") and os.environ.get("WAYLAND_DISPLAY") \
+            and os.environ.get("DISPLAY"):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+
     i18n.prepare_environment()
     flags = [f for f in (args.extra_flags or "").split(";") if f.strip()]
     apply_chromium_flags(flags)
@@ -891,7 +951,12 @@ def main(argv: list[str] | None = None) -> int:
     CACHE_SUBDIR.mkdir(parents=True, exist_ok=True)
 
     window, app = build_window(url, note, autostart=not args.no_start)
-    window.show()
+    # Wayland 上窗口 show() 出来可能没有被合成器激活，此时菜单/弹窗抓不到输入
+    # （表现为必须先失去一次焦点）。这里显式抬升并激活一次作为兜底；
+    # 真正的解法见 main() 里切换到 XWayland 的那段。
+    from PySide6.QtCore import QTimer as _QTimer
+    _QTimer.singleShot(0, lambda w=window: (w.raise_(), w.activateWindow()))
+
     return app.exec()
 
 

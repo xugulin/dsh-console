@@ -53,6 +53,9 @@ _CHROMIUM = {LANG_ZH: "zh-CN", LANG_EN: "en-US"}
 
 #: 中文原文 → English。**键要和代码里的字符串一字不差。**
 _EN: dict[str, str] = {
+    "在系统浏览器中打开此页": "Open this page in system browser",
+    "在系统浏览器中打开链接": "Open link in system browser",
+    "翻译选中文字": "Translate selection",
     "（查不到）": "(unavailable)",
     "未查到 API key": "No API key found",
     "标签": "tag",
