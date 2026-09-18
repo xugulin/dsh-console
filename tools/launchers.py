@@ -43,7 +43,26 @@ DESKTOP = "dsh-console.desktop"
 README = "README-Portable.md"
 
 #: 各个启动器给 main.py 传的参数
-ARGS = {"console": [], "tui": ["--tui"], "web": ["--web"]}
+ARGS = {"console": [], "tui": ["--tui"], "web": ["--web"], "stop": ["--stop"]}
+
+#: **中文文件名的启动器**（用户反馈：中文用户不该被英文文件名挡住）。
+#: 内容与英文那套完全一致——同一批模板生成，只是文件名与标题用中文；
+#: 英文名保留，两套并存，用户挑顺手的用。
+ZH_WIN = {
+    "console": "启动DSH控制台.bat",
+    "debug": "启动DSH控制台-调试.bat",
+    "web": "启动DSH网页界面.bat",
+    "tui": "启动DSH终端.bat",
+    "stop": "停止DSH服务.bat",
+    "shortcut": "创建桌面快捷方式.bat",
+}
+ZH_LINUX = {
+    "console": "启动DSH控制台.sh",
+    "web": "启动DSH网页界面.sh",
+    "tui": "启动DSH终端.sh",
+    "stop": "停止DSH服务.sh",
+    "install": "创建桌面快捷方式.sh",
+}
 
 LINUX_ENV = """\
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -581,6 +600,11 @@ def write_launchers(dst: Path, *, node_version: str, py_version: str,
         _linux_launcher(dst, LINUX, "启动 DSH 控制台（图形界面）", ARGS["console"])
         _linux_launcher(dst, LINUX_TUI, "启动 DSH 终端界面（TUI）", ARGS["tui"])
         _linux_launcher(dst, LINUX_WEB, "启动 DSH 网页界面（浏览器）", ARGS["web"])
+        # 中文文件名的那套（同一批模板，只是名字是中文）
+        _linux_launcher(dst, ZH_LINUX["console"], "启动 DSH 控制台（中文名）", ARGS["console"])
+        _linux_launcher(dst, ZH_LINUX["tui"], "启动 DSH 终端界面（中文名）", ARGS["tui"])
+        _linux_launcher(dst, ZH_LINUX["web"], "启动 DSH 网页界面（中文名）", ARGS["web"])
+        _linux_launcher(dst, ZH_LINUX["stop"], "停止 DSH 服务（中文名）", ARGS["stop"])
         _write(dst / LINUX_INSTALL, INSTALL_DESKTOP.replace("{desktop}", DESKTOP),
                executable=True)
 
@@ -593,10 +617,23 @@ def write_launchers(dst: Path, *, node_version: str, py_version: str,
         # TUI 例外：它本身就是终端程序，藏掉终端就没得用了
         _windows_launcher(dst, WIN_TUI, "启动 DSH 终端界面（TUI）", ARGS["tui"], silent=False)
         _windows_launcher(dst, WIN_WEB, "启动 DSH 网页界面（浏览器）", ARGS["web"], silent=True)
+        # 中文文件名的那套
+        _windows_launcher(dst, ZH_WIN["console"], "启动 DSH 控制台（中文名，不留黑框）",
+                          ARGS["console"], silent=True)
+        _windows_launcher(dst, ZH_WIN["debug"], "启动 DSH 控制台-调试（中文名，带控制台）",
+                          ARGS["console"], silent=False)
+        _windows_launcher(dst, ZH_WIN["tui"], "启动 DSH 终端界面（中文名）",
+                          ARGS["tui"], silent=False)
+        _windows_launcher(dst, ZH_WIN["web"], "启动 DSH 网页界面（中文名，不留黑框）",
+                          ARGS["web"], silent=True)
+        _windows_launcher(dst, ZH_WIN["stop"], "停止 DSH 服务（中文名，显示结果）",
+                          ARGS["stop"], silent=False)
 
     # .bat/.vbs 一律 CRLF + GBK，.ps1 一律 CRLF + 带 BOM 的 UTF-8（理由见 _write）
     if "win" in platforms:
         _write(dst / WIN_SHORTCUT, WIN_SHORTCUT_BAT, newline="\r\n", encoding="gbk")
+        # 中文名的快捷方式入口：同一份脚本内容，只是文件名是中文
+        _write(dst / ZH_WIN["shortcut"], WIN_SHORTCUT_BAT, newline="\r\n", encoding="gbk")
         _write(dst / "Create-Desktop-Shortcut.ps1", WIN_SHORTCUT_PS,
                newline="\r\n", encoding="utf-8", bom=True)
         _write(dst / WIN_BOOTSTRAP_NAME, WIN_BOOTSTRAP_PS,
@@ -621,8 +658,8 @@ def write_launchers(dst: Path, *, node_version: str, py_version: str,
     _write(dst / README, _readme(dst, node_version, py_version, windows_ready,
                                  platforms=platforms))
     counts = " + ".join(x for x in (
-        "Linux 4 个" if "linux" in platforms else "",
-        "Windows 8 个" if "win" in platforms else "",
+        "Linux 8 个" if "linux" in platforms else "",
+        "Windows 14 个" if "win" in platforms else "",
     ) if x)
     print(f"  启动器：{counts} + 说明")
 
@@ -670,7 +707,11 @@ def _readme(dst: Path, node_version: str, py_version: str, windows_ready: bool,
 | `Start-DSH-Console-Debug.exe` / `.bat` | 会（**故意保留**） | 出问题时用：报错能看见 |
 | `Start-DSH-Terminal.exe` / `.bat` | 会（**必须有**） | 终端界面 TUI，本身就是终端程序 |
 
-想要桌面图标：双击 **`Create-Desktop-Shortcut.bat`**。
+**中文用户看这里**：包内还有一套**中文文件名**的启动器，功能与上面完全相同——
+`启动DSH控制台.bat`、`启动DSH控制台-调试.bat`、`启动DSH网页界面.bat`、`启动DSH终端.bat`、
+`停止DSH服务.bat`（不用开界面就能停掉 harness）、`创建桌面快捷方式.bat`。
+
+想要桌面图标：双击 **`Create-Desktop-Shortcut.bat`**（或中文名的 `创建桌面快捷方式.bat`）。
 走 PowerShell 创建带图标的 `.lnk`；万一 PowerShell 被策略拦住或机器上没有，
 它会**自动兜底**把启动器放到桌面上，并把原因打印出来（窗口不会一闪而过）。
 """ if "win" in platforms else ""

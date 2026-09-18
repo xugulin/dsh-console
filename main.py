@@ -182,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--theme", help="启动时使用的主题 key（见 --list-themes）")
     parser.add_argument("--list-themes", action="store_true", help="列出所有主题后退出")
     parser.add_argument("--self-test", action="store_true", help="无界面自检后退出")
+    parser.add_argument("--stop", action="store_true",
+                        help="停掉正在运行的 harness（不打开界面；供「停止DSH服务」启动器使用）")
     parser.add_argument("--tui", action="store_true", help="启动终端版前端（TUI，其余参数转交它）")
     parser.add_argument("--web", action="store_true",
                         help="确保 harness 的 web 服务在跑，并用浏览器打开它")
@@ -189,6 +191,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     from dsh_console import themes
+
+    if args.stop:
+        # 给"停止DSH服务"启动器用的：**不打开界面**，优雅停掉 harness。
+        # 走 service.stop()（便携模式用 run/web.pid + SIGTERM，不是 kill -9——
+        # 强杀会丢浏览器登录态，见 service.py 的注释）。
+        from dsh_console import service
+
+        try:
+            st = service.get_status()
+            if not st.is_running:
+                print("harness 本来就没在运行，无需停止。")
+                return 0
+            service.stop()
+            print("已发送停止请求；harness 正在退出（浏览器登录态会在干净退出时落盘）。")
+            return 0
+        except Exception as exc:                 # noqa: BLE001
+            print(f"停止失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
 
     if args.list_themes:
         for t in themes.THEMES:
