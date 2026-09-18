@@ -23,9 +23,16 @@ window.__ModuleLoader__.load({
 
     const apply = (ctx) => {
       try {
-        ctx.slots.register(
-          { name: 'conversation.view', id: PANEL_ID, order: 60, label: () => '显示器' },
-          () => h(Display),
+        // ⚠️ 必须先 `slots.inject(slot, …)` **等声明**，再在里面 register。
+        // 直接 register 会被拒：Error: slot "conversation.view" is not declared
+        // (a parent entry's children table must declare it)。
+        // 这是 dsh-browser-panel 的官方写法（它的注释：slots.inject waits for the
+        // declaration instead）。
+        ctx.slots.inject('conversation.view', () =>
+          ctx.slots.register(
+            { name: 'conversation.view', id: PANEL_ID, order: 60, label: () => '显示器' },
+            () => h(Display),
+          ),
         )
       } catch (error) {
         console.warn('[dsh-display-panel] slot registration failed:', error)
