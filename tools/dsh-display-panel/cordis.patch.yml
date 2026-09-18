@@ -1,0 +1,6 @@
+# 把"显示器"面板挂进 profile 花名册。宿主半边（exports "."）只是占位，
+# 真正干活的是 Web GUI 侧（package.json 的 dsh.client 声明会让 exports "./client"
+# 在浏览器里加载，它注册一个 conversation.view 槽位）。
+- insert:
+    - id: display-panel
+      name: 'dsh-display-panel'
