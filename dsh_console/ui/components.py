@@ -111,6 +111,10 @@ class PopupMenu(QWidget):
 
     triggered = Signal(str)                 # 被点条目的 id
 
+    #: 当前打开的浮层菜单。**同一时刻只允许一个**：右键连点会叠出好几层
+    #: （用户截图里同时出现 3 个），既难看又容易点错。
+    _current: "PopupMenu | None" = None
+
     def __init__(self, parent: QWidget, items, theme, *, width: int = 236) -> None:
         super().__init__(parent)
         self._theme = theme
@@ -161,6 +165,14 @@ class PopupMenu(QWidget):
         w, h = self.width(), self.height()
         x = min(max(0, pos.x()), max(0, parent.width() - w))
         y = min(max(0, pos.y()), max(0, parent.height() - h))
+        # 先把上一个还在的关掉，避免叠加
+        prev = PopupMenu._current
+        if prev is not None and prev is not self:
+            try:
+                prev.close_menu()
+            except Exception:                # noqa: BLE001
+                pass
+        PopupMenu._current = self
         self.move(x, y)
         self.show()
         self.raise_()
@@ -174,6 +186,8 @@ class PopupMenu(QWidget):
                 first.setFocus()
 
     def close_menu(self) -> None:
+        if PopupMenu._current is self:
+            PopupMenu._current = None
         win = self.window()
         if win is not None:
             win.removeEventFilter(self)
