@@ -42,7 +42,7 @@ from pathlib import Path
 
 from . import i18n
 from . import browser_theme as bt
-from .screenfit import apply_screen_fit
+from .screenfit import apply_screen_fit, prefer_xwayland
 from . import config as console_config
 
 #: profile 与缓存的落点。便携模式下 HOME 已被启动器指到包内，所以自动落在包里。
@@ -911,16 +911,11 @@ def main(argv: list[str] | None = None) -> int:
     # **必须在建 QApplication 之前**：QtWebEngine 只在初始化时读这个变量。
     # 先让 i18n 把 ``--lang=zh-CN``（或 en-US）追加进去——内置浏览器的界面语言
     # 就是这么定的；用户手动给的 --extra-flags 排在它后面，仍然可以覆盖。
-    # ⚠️ Wayland 下的弹窗/菜单抓不到输入（窗口没被合成器激活时更明显）。
-    #
-    # **不要自动改成 xcb**：Wayland 环境是用户自己配好的——这套桌面上常见的写法就是
-    # ``QT_QPA_PLATFORM=wayland;xcb``（见 tools/screenshot.py 的注释），我们偷偷改掉
-    # 等于把用户的选择顶掉。想要"退回 XWayland"的人显式开关：
-    #     DSH_BROWSER_QPA=xcb  ./启动DSH控制台.sh
-    _qpa = (os.environ.get("DSH_BROWSER_QPA") or "").strip()
-    if _qpa:
-        os.environ["QT_QPA_PLATFORM"] = _qpa
-        print(f"内置浏览器：按 DSH_BROWSER_QPA 使用 Qt 平台 {_qpa}", file=sys.stderr)
+    # Wayland 下菜单要先"收到输入"才允许弹出（详见 screenfit.prefer_xwayland 的说明），
+    # 所以内置浏览器**默认退回 XWayland**；想用原生 Wayland：DSH_BROWSER_QPA=wayland
+    _plat = prefer_xwayland("DSH_BROWSER_QPA")
+    if _plat:
+        print(f"内置浏览器：Qt 平台 = {_plat}（可用 DSH_BROWSER_QPA 覆盖）", file=sys.stderr)
 
     i18n.prepare_environment()
     flags = [f for f in (args.extra_flags or "").split(";") if f.strip()]

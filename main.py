@@ -232,6 +232,11 @@ def main(argv: list[str] | None = None) -> int:
     from PySide6.QtWidgets import QApplication
 
     from dsh_console import i18n
+    from dsh_console.screenfit import prefer_xwayland
+
+    # 与内置浏览器同样处理：Wayland 下菜单要先收到输入才允许弹出，
+    # 默认退回 XWayland；DSH_CONSOLE_QPA=wayland 可切回原生。
+    prefer_xwayland("DSH_CONSOLE_QPA")
     from dsh_console.ui.main_window import MainWindow
 
     # ⚠️ 顺序要紧：语言环境必须在 QApplication **之前**定下来（Chromium 的 --lang

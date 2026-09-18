@@ -71,3 +71,33 @@ def apply_screen_fit(widget, want: tuple[int, int], floor: tuple[int, int]) -> N
             )
     except Exception:  # noqa: BLE001
         pass
+
+def prefer_xwayland(env_var: str, *, default: str = "xcb") -> str:
+    """在 Wayland 会话里**默认退回 XWayland**，返回最终生效的平台名。
+
+    为什么（本机 headless Wayland 实测，Qt 自己报的错）：
+
+        qt.qpa.wayland: Failed to create grabbing popup. Ensure popup ...
+        has a transientParent set and that parent window has received input.
+
+    Wayland 规定：客户端**只有在窗口"收到过输入"之后**才能创建 grabbing popup。
+    窗口刚 show() 出来、合成器还没把输入给它时，**用户第一次点击会被合成器吃掉
+    用于激活窗口**，不会递到控件——于是"菜单点了没反应，要先失去一次焦点"。
+    实测 ``popup()`` 与 ``exec()`` 在该状态下**都失败**（两条路各测一次，
+    ``isVisible()`` 均为 False），所以只能从平台层面绕开：XWayland 没有这条限制。
+
+    尊重用户设置：``env_var`` 有值就用它（例如 ``DSH_BROWSER_QPA=wayland`` 切回原生）。
+    """
+    import os
+
+    override = (os.environ.get(env_var) or "").strip()
+    if override:
+        os.environ["QT_QPA_PLATFORM"] = override
+        return override
+    qpa = (os.environ.get("QT_QPA_PLATFORM") or "").strip()
+    on_wayland = bool(os.environ.get("WAYLAND_DISPLAY")) or "wayland" in qpa
+    # 没有 XWayland（DISPLAY 为空）时不能切，否则 Qt 起不来
+    if on_wayland and os.environ.get("DISPLAY"):
+        os.environ["QT_QPA_PLATFORM"] = default
+        return default
+    return qpa or ""
