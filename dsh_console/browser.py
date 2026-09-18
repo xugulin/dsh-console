@@ -465,10 +465,11 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
 
         def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt 命名
             menu = self.build_menu()
-            try:
-                menu.exec(event.globalPos())
-            finally:
-                menu.deleteLater()
+            # 用 popup 而不是 exec：Wayland 上 exec() 的嵌套事件循环在窗口尚未被激活时
+            # 会"弹不出来/一闪而过"（实测：必须先失去一次焦点）。popup 走 xdg-popup 路径，
+            # 且不阻塞，配合 show() 后的 activateWindow() 基本就正常了。
+            menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            menu.popup(event.globalPos())
             event.accept()
 
     class Browser(QMainWindow):
@@ -910,13 +911,16 @@ def main(argv: list[str] | None = None) -> int:
     # **必须在建 QApplication 之前**：QtWebEngine 只在初始化时读这个变量。
     # 先让 i18n 把 ``--lang=zh-CN``（或 en-US）追加进去——内置浏览器的界面语言
     # 就是这么定的；用户手动给的 --extra-flags 排在它后面，仍然可以覆盖。
-    # ⚠️ **Wayland 下的弹窗/菜单抓不到输入**：窗口 show() 出来后如果没有被合成器
-    # 激活，右键菜单和工具栏菜单会"点了没反应"，用户必须先点别处、再点回来才行
-    # （实测反馈）。走 XWayland（xcb）能绕开这一整套 xdg-activation 的时序问题。
-    # 只在"Wayland 且有 XWayland 可用、用户又没自己指定平台"时才切，尊重用户设置。
-    if not os.environ.get("QT_QPA_PLATFORM") and os.environ.get("WAYLAND_DISPLAY") \
-            and os.environ.get("DISPLAY"):
-        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    # ⚠️ Wayland 下的弹窗/菜单抓不到输入（窗口没被合成器激活时更明显）。
+    #
+    # **不要自动改成 xcb**：Wayland 环境是用户自己配好的——这套桌面上常见的写法就是
+    # ``QT_QPA_PLATFORM=wayland;xcb``（见 tools/screenshot.py 的注释），我们偷偷改掉
+    # 等于把用户的选择顶掉。想要"退回 XWayland"的人显式开关：
+    #     DSH_BROWSER_QPA=xcb  ./启动DSH控制台.sh
+    _qpa = (os.environ.get("DSH_BROWSER_QPA") or "").strip()
+    if _qpa:
+        os.environ["QT_QPA_PLATFORM"] = _qpa
+        print(f"内置浏览器：按 DSH_BROWSER_QPA 使用 Qt 平台 {_qpa}", file=sys.stderr)
 
     i18n.prepare_environment()
     flags = [f for f in (args.extra_flags or "").split(";") if f.strip()]
