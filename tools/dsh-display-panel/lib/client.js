@@ -1,6 +1,9 @@
 /**
  * dsh-display-panel — 浏览器半边：在「对话 / 轨迹 / 浏览器」那一排里加一个「显示器」标签。
  *
+ * 每个 harness 会话看**自己那一路**显示：/s/<sessionId>/ —— 互不可见、互不污染
+ * （早先所有会话共用一台显示，别的项目的窗口会混进来）。
+ *
  * 纯 JavaScript（和 dsh-browser-panel 一样）：模块加载器工厂不依赖构建步骤，
  * 除了宿主提供的 React 之外不依赖任何 npm 包。
  */
@@ -12,24 +15,23 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     const PANEL_ID = 'display-panel'
-    /** 显示器地址：DSH Console 自建的 MJPEG 虚拟显示服务。 */
-    const VIEWER = 'http://127.0.0.1:8099/'
+    /** 显示器服务地址；每个会话在 /s/<sessionId>/ 下有自己的一路。 */
+    const VIEWER = 'http://127.0.0.1:8099'
     /** 探测间隔：显示器是外部进程，随时可能起停。 */
     const POLL_MS = 3000
 
-    /** 文案（照 dsh-browser-panel 的空态结构写）。 */
     const TEXT = {
       empty: '显示器还没有打开',
-      emptyHint: '打开后这里就是我在虚拟显示上的实时画面（只读，约 1.5 帧/秒）。'
-        + '它跑在 headless Wayland 上，和你的桌面互不干扰；我在这上面做的 GUI 测试你都能直接看到。',
+      emptyHint: '打开后这里就是我在虚拟显示上的实时画面（只读约 1.5 帧/秒，可点击、可输入）。'
+        + '每个会话有自己独立的一台显示，别的会话看不到这里的画面。',
       open: '重新检测',
       checking: '正在检查显示器…',
-      retryHint: '需要打开时告诉我一声（AI 会拉起虚拟显示服务），或自己执行：'
-        + ' DSH_VIEW_PORT=8099 python3 /tmp/dshview/view.py',
+      retryHint: '需要打开时告诉我一声（AI 会拉起这台显示），或自己执行：'
+        + ' python3 tools/dsh-display-viewer.py',
+      noSession: '这里拿不到会话 id，无法确定这个面板对应哪台显示。',
     }
 
-    /** 样式只注入一次。**背景保持 transparent**，这样底色就是面板自己的 ——
-     *  也就是和「对话」页同一套底色（用户明确要求一致）。 */
+    /** 样式只注入一次。**背景保持 transparent**，底色就是面板自己的（与「对话」一致）。 */
     const CSS = `
       .ddp-root { width: 100%; height: 100%; display: flex; background: transparent; }
       .ddp-frame { width: 100%; height: 100%; border: 0; display: block; background: #0b0b0c; }
@@ -57,17 +59,20 @@ window.__ModuleLoader__.load({
       document.head.appendChild(el)
     }
 
-    function Display() {
+    function Display(props) {
+      const sid = props && props.sessionId ? String(props.sessionId) : ''
+      const base = sid ? VIEWER + '/s/' + encodeURIComponent(sid) + '/' : ''
       const [state, setState] = useState('checking')   // checking | ready | empty
       const [nonce, setNonce] = useState(0)
 
       useEffect(() => { ensureStyle() }, [])
 
       useEffect(() => {
+        if (!base) { setState('empty'); return undefined }
         let alive = true
         const probe = async () => {
           try {
-            const res = await fetch(VIEWER, { cache: 'no-store' })
+            const res = await fetch(base, { cache: 'no-store' })
             if (alive) setState(res.ok ? 'ready' : 'empty')
           } catch (error) {
             if (alive) setState('empty')
@@ -76,15 +81,19 @@ window.__ModuleLoader__.load({
         void probe()
         const timer = setInterval(() => { void probe() }, POLL_MS)
         return () => { alive = false; clearInterval(timer) }
-      }, [nonce])
+      }, [base, nonce])
 
+      if (!sid) {
+        return h('div', { className: 'ddp-root' },
+          h('div', { className: 'ddp-empty' }, h('div', { className: 'ddp-note' }, TEXT.noSession)))
+      }
       if (state === 'ready') {
         return h('div', { className: 'ddp-root' },
           h('iframe', {
             key: nonce,
             className: 'ddp-frame',
-            src: VIEWER,
-            title: 'DSH 显示器',
+            src: base,
+            title: 'DSH 显示器 · ' + sid,
           }))
       }
       if (state === 'checking') {
@@ -104,12 +113,15 @@ window.__ModuleLoader__.load({
 
     const apply = (ctx) => {
       try {
-        // ⚠️ 必须先 `slots.inject(slot, …)` **等声明**，再在里面 register ——
-        // 直接 register 会被拒（slot ... is not declared）。写法同 dsh-browser-panel。
+        // ⚠️ 必须先 slots.inject 等声明再 register；并且 inject 里带上 sessionId ——
+        // 面板才知道该显示**哪个会话**的那台显示。
         ctx.slots.inject('conversation.view', () =>
           ctx.slots.register(
-            { name: 'conversation.view', id: PANEL_ID, order: 60, label: () => '显示器' },
-            () => h(Display),
+            {
+              name: 'conversation.view', id: PANEL_ID, order: 60, label: () => '显示器',
+              inject: (sessionId) => ({ sessionId: typeof sessionId === 'string' ? sessionId : '' }),
+            },
+            (props) => h(Display, props),
           ),
         )
       } catch (error) {
