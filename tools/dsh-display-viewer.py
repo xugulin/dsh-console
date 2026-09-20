@@ -389,6 +389,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Access-Control-Allow-Origin", "*")
+        # ⚠️ 必须禁用缓存：页面里写着"本会话的显示号"，而显示号/服务状态会变。
+        # 早先没设这些头，Chromium 缓存了旧页面 —— 用户刷新后仍看到旧显示号
+        # （页头写着 :233、而实际已是 :265），旧显示又已被清理 → 满屏漆黑。
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -443,6 +449,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
             self.end_headers()
             while True:
                 with sess.lock:

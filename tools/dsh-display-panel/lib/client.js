@@ -62,6 +62,8 @@ window.__ModuleLoader__.load({
     function Display(props) {
       const sid = props && props.sessionId ? String(props.sessionId) : ''
       const base = sid ? VIEWER + '/s/' + encodeURIComponent(sid) + '/' : ''
+      // 防缓存：显示器服务可能重启，显示号也会变；iframe 必须每次拿新页面
+      const cacheBust = '?v=' + Date.now()
       const [state, setState] = useState('checking')   // checking | ready | empty
       const [nonce, setNonce] = useState(0)
 
@@ -72,7 +74,7 @@ window.__ModuleLoader__.load({
         let alive = true
         const probe = async () => {
           try {
-            const res = await fetch(base, { cache: 'no-store' })
+            const res = await fetch(base + cacheBust, { cache: 'no-store' })
             if (alive) setState(res.ok ? 'ready' : 'empty')
           } catch (error) {
             if (alive) setState('empty')
@@ -92,7 +94,7 @@ window.__ModuleLoader__.load({
           h('iframe', {
             key: nonce,
             className: 'ddp-frame',
-            src: base,
+            src: base + cacheBust,
             title: 'DSH 显示器 · ' + sid,
           }))
       }
