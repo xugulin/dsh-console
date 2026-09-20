@@ -12,8 +12,7 @@ Environment=DSH_VIEW_BACKEND=x11
 ExecStart=/home/xgl/python/python3147uv/bin/python /home/xgl/python/DeepSeekHarness控制台/tools/dsh-display-viewer.py
 Restart=always
 RestartSec=3
-# 只清理本服务自己的进程，别碰 harness
-KillMode=process
+# 退出时连同自己拉起的 Xvfb 一起清掉（viewer 也会在信号里主动收拾）
 
 [Install]
 WantedBy=default.target

@@ -118,10 +118,11 @@ class Session:
         if self._alive():
             return True
         try:
-            subprocess.Popen(
+            proc = subprocess.Popen(
                 ["Xvfb", self.display, "-screen", "0", f"{W}x{H}x24", "-nolisten", "tcp"],
                 stdout=open(os.path.join(self.dir, "xvfb.log"), "ab"),
-                stderr=subprocess.STDOUT, start_new_session=True)
+                stderr=subprocess.STDOUT)
+            _spawned.append(proc)                    # 交给退出清理
         except Exception as exc:                     # noqa: BLE001
             print(f"[{self.sid}] Xvfb 启动失败：{exc}", flush=True)
             return False
@@ -169,6 +170,46 @@ class Session:
 
 _sessions: dict[str, Session] = {}
 _sessions_lock = threading.Lock()
+
+#: 本服务拉起的显示服务器进程 —— 服务退出时要**自己收拾干净**。
+#: 早先用 start_new_session=True 起 Xvfb 又配了 KillMode=process，结果停服务时只杀主进程，
+#: Xvfb 全变成孤儿（systemd 日志里 "remains running after unit stopped"，
+#: 既泄漏显示又让 systemd 认为服务实现有缺陷）。
+_spawned: list[subprocess.Popen] = []
+
+
+def _cleanup_spawned() -> None:
+    """退出前把自己拉起的显示服务器一并终止。"""
+    for proc in list(_spawned):
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+        except Exception:                            # noqa: BLE001
+            pass
+    deadline = time.time() + 3
+    for proc in list(_spawned):
+        try:
+            remaining = max(0.1, deadline - time.time())
+            proc.wait(timeout=remaining)
+        except Exception:                            # noqa: BLE001
+            try:
+                proc.kill()
+            except Exception:                        # noqa: BLE001
+                pass
+
+
+def _install_signal_handlers() -> None:
+    import signal as _signal
+
+    def handler(_signum, _frame):
+        _cleanup_spawned()
+        raise SystemExit(0)
+
+    for sig in (_signal.SIGTERM, _signal.SIGINT, _signal.SIGHUP):
+        try:
+            _signal.signal(sig, handler)
+        except Exception:                            # noqa: BLE001
+            pass
 
 
 def session(sid: str) -> Session:
@@ -506,7 +547,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(503, "no frame yet")
             return
         if rest == "/display":
-            # 便于脚本查询"这个会话的显示号是多少"
+            # 便于脚本查询"这个会话的显示号是多少"。
+            # ⚠️ 这里也要 ensure()：否则调用方拿到号就去启动程序，而显示还没被拉起来，
+            # X 客户端会直接连不上（Xvfb 是按需创建的）。
+            sess.ensure()
             self._send(json.dumps({"session": sid, "display": sess.display,
                                    "backend": BACKEND, "size": f"{W}x{H}"}).encode(),
                        "application/json")
@@ -517,6 +561,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    import atexit
+
+    _install_signal_handlers()
+    atexit.register(_cleanup_spawned)
     print(f"viewer on http://127.0.0.1:{PORT}/ · 后端 {BACKEND} · 每会话独立 "
           f"（/s/<sessionId>/）· {W}x{H} · 支持双向注入", flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
