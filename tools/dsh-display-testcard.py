@@ -18,9 +18,10 @@ dsh-display-selftest.py 是**自动**那一半（脚本自己验 11 项功能，
     · 秒针 + 时钟   → 是**实时**画面，不是卡住的旧帧（静止不动就说明流断了）
     · 顶部信息行    → 确认画的是哪台显示、哪个 Qt 平台、什么分辨率
 
-⚠️ 规范位置：https://github.com/xugulin/dsh-display-panel
-   （插件本体、显示器服务、systemd 单元都在那个仓库；这里是开发副本，
-     改动时以插件仓库为准，改完再同步回来，别只改一边。）
+ℹ️ 仓库归属：本卡与 tools/dsh-display-selftest.py 同类 —— 显示器的**测试工具**，
+   家就在本仓库的 tools/ 下。（独立成仓库的是插件本体与显示器服务：
+   https://github.com/xugulin/dsh-display-panel ，那边 README 的「自测」一节
+   引用的正是本仓库的 tools/。）
 """
 
 from __future__ import annotations
