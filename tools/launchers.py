@@ -609,6 +609,21 @@ def write_launchers(dst: Path, *, node_version: str, py_version: str,
                executable=True)
 
     if "win" in platforms:
+        # 显示器服务的启动/停止脚本（社区用户编写、Windows 实测通过）。
+        # 它们按便携包布局写死了 runtime\win\python 与 app\tools\dsh-display-viewer.py，
+        # 与 build_bundle 的复制规则一致，因此原样复制即可，不改路径。
+        win_svc = Path(__file__).resolve().parent.parent / "tools" / "win-display-service"
+        if win_svc.is_dir():
+            n = 0
+            for src in sorted(win_svc.iterdir()):
+                if src.suffix.lower() in (".bat", ".vbs"):
+                    # ⚠️ 必须显式 newline="\r\n"：read_text 会把源码里的 CRLF 归一成 \n，
+                    # 写的时候不补回去就是**裸 LF** —— 这种问题在 Linux 上看不出来，
+                    # 到了 Windows 的 cmd 里会变成一屏报错。包自带的检查器会拦下它。
+                    _write(dst / src.name, src.read_text(encoding="gbk", errors="replace"),
+                           newline="\r\n", encoding="gbk")
+                    n += 1
+            log(f"显示器服务启动脚本：Windows {n} 个")
         _windows_launcher(dst, WIN, "启动 DSH 控制台（图形界面，不留黑框）",
                           ARGS["console"], silent=True)
         # 带控制台的同胞兄弟：不留黑框的那几个**看不到启动报错**，出问题看这个
