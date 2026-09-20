@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-#!/usr/bin/env python3
-#!/usr/bin/env python3
 # ⚠️ 规范位置：https://github.com/xugulin/dsh-display-panel
 #    （插件本体、显示器服务、systemd 单元都在那个仓库；这里是开发副本，
-"""DSH 测试显示器：**每个 harness 会话一台完全独立的显示**，能看画面，也能把
-浏览器里的鼠标/键盘操作注入回去。
+#      改动时以插件仓库为准，改完再同步回来，别只改一边。）
 """DSH 测试显示器：**每个 harness 会话一台完全独立的显示**，能看画面，也能把
 浏览器里的鼠标/键盘操作注入回去。
 
@@ -67,6 +64,7 @@ GDI+ 编码 JPEG，纯 ``ctypes``，不依赖 Pillow / ffmpeg / ImageMagick。
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import subprocess
@@ -265,7 +263,6 @@ if IS_MAC:
 # ================================================================ win32 后端
 # 只放平台原语：抓一帧、注入一个事件。取舍见文件头「Windows（win32 后端）」。
 if IS_WIN:
-    import ctypes
     from ctypes import wintypes
 
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
