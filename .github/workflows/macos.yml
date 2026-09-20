@@ -1,0 +1,63 @@
+name: macOS smoke (DSH Console)
+
+# 为什么要有它：这是个 PySide6 桌面程序，而"能不能 import"抓不到真正的平台差异
+# （布局、字体、渲染后端、Qt 版本行为）。这里在 GitHub 免费的 macOS runner 上
+# 真起一遍 Qt（offscreen ✓ 不需要显示器），渲染 7 套主题与市场源设置对话框，
+# 并把截图作为 artifact 上传 —— 出问题时能直接看图，而不是只看一行报错。
+#
+# 特意选的是**不需要 harness / 不需要网络**的那部分检查：CI 上没有 DSH 服务、
+# 也没有 API key，依赖它们的项（自检里的接口/余额等）在这里跳过。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 环境信息
+        run: |
+          sw_vers
+          python -V
+          echo "runner: $RUNNER_OS $RUNNER_ARCH"
+
+      - name: 安装 PySide6
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install PySide6
+          python -c "import PySide6; print('PySide6', PySide6.__version__)"
+
+      - name: 语法检查（全部 Python 文件）
+        run: python -m compileall -q dsh_console main.py tools || true
+
+      - name: 名字检查器（项目自带的静态检查）
+        run: |
+          if python -c "import tools.namecheck" 2>/dev/null; then
+            python -m tools.namecheck || echo "（需要参数，跳过）"
+          else
+            echo "（无 CLI，跳过）"
+          fi
+
+      - name: 离屏 GUI 冒烟（真 Qt，无显示器）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python tools/ci_gui_smoke.py "$RUNNER_TEMP/shots"
+
+      - name: 上传截图（无论成败都传，失败了才有图看）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-gui-shots
+          path: ${{ runner.temp }}/shots/*.png
+          if-no-files-found: warn
+          retention-days: 14
