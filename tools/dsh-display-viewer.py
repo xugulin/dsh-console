@@ -280,11 +280,35 @@ def inject(sess: Session, obj: dict) -> None:
             # 先等一下：焦点刚落定时立刻注入，开头几个字符会掉（Wayland 那边实测过，
             # X11 同样给一点余量更稳）
             time.sleep(0.1)
-            run_tool(sess, ["xdotool", "type", "--clearmodifiers", "--delay", "25", text])
+            _type_text(sess, text)
     elif kind == "key":
         key = str(obj.get("k") or "")
         if key:
             run_tool(sess, ["xdotool", "key", _xdotool_key(key)])
+
+
+def _type_text(sess: Session, text: str) -> None:
+    """把一段文本送进该会话显示上**有焦点**的那个控件。
+
+    ASCII 直接 ``xdotool type``；**含非 ASCII（中文等）必须走剪贴板 + Ctrl+V**：
+    ``xdotool type`` 是靠临时映射 keysym 打字符的，CJK 上不可靠 —— 实测
+    "中文显示器" 一个字都进不去（自测第 9 项就是这条）。剪贴板路线对任意 Unicode 都稳。
+    """
+    if all(ord(ch) < 128 for ch in text):
+        run_tool(sess, ["xdotool", "type", "--clearmodifiers", "--delay", "25", text])
+        return
+    try:
+        proc = subprocess.run(["xclip", "-selection", "clipboard"], env=sess.env,
+                              input=text.encode("utf-8"), capture_output=True, timeout=10)
+        if proc.returncode != 0:
+            print(f"[{sess.sid}] xclip 失败：{proc.stderr.decode('utf-8', 'replace')[:120]}",
+                  flush=True)
+            return
+    except Exception as exc:                         # noqa: BLE001
+        print(f"[{sess.sid}] xclip 异常：{type(exc).__name__}: {exc}", flush=True)
+        return
+    time.sleep(0.15)
+    run_tool(sess, ["xdotool", "key", "--clearmodifiers", "ctrl+v"])
 
 
 def _inject_wayland(sess: Session, obj: dict) -> None:
