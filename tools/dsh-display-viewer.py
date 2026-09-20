@@ -42,10 +42,23 @@
 ⚠️ ``QT_QPA_PLATFORM=xcb`` 必须显式指定：环境里若残留 ``WAYLAND_DISPLAY``，
 Qt 会去加载 wayland 插件并失败（实测踩过）。
 
+## Windows（win32 后端）
+
+Windows 没有 Xvfb 这类可以任意多开的 headless 显示服务器（虚拟显示器要装内核
+驱动、要管理员），所以 win32 后端**直接抓真实桌面**：GDI ``BitBlt`` 取像素 +
+GDI+ 编码 JPEG，纯 ``ctypes``，不依赖 Pillow / ffmpeg / ImageMagick。
+
+* 代价一：**所有会话看到的是同一块屏**，per-session 隔离在这条路上不存在
+  （Windows 上本来也只有一块桌面可以看）。
+* 代价二：注入的是**真实**鼠标键盘。因此 win32 下注入**默认关闭**（只读观看），
+  要开就设 ``DSH_VIEW_INPUT=1``；页面抬头会写明当前是哪种模式。
+
 ## 环境变量
 
 ``DSH_DISPLAY_HOME``（默认 ~/.cache/dsh-display）、``DSH_VIEW_PORT``（默认 8099）、
-``DSH_VIEW_SIZE``（默认 1600x1000）、``DSH_VIEW_BACKEND=x11|wayland``（默认 x11）。
+``DSH_VIEW_SIZE``（默认 1600x1000；win32 下默认取真实屏幕）、
+``DSH_VIEW_BACKEND=x11|wayland|win32``（Windows 上默认 win32，其余默认 x11）、
+``DSH_VIEW_INPUT=1``（仅 win32：允许把点击/按键注入真实桌面，默认关）。
 """
 
 from __future__ import annotations
@@ -53,21 +66,289 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+IS_WIN = sys.platform == "win32"
 HOME_DIR = os.environ.get("DSH_DISPLAY_HOME") or os.path.expanduser("~/.cache/dsh-display")
 PORT = int(os.environ.get("DSH_VIEW_PORT", "8099"))
 W, H = (int(x) for x in (os.environ.get("DSH_VIEW_SIZE") or "1600x1000").split("x"))
-BACKEND = (os.environ.get("DSH_VIEW_BACKEND") or "x11").strip().lower()
+BACKEND = (os.environ.get("DSH_VIEW_BACKEND") or ("win32" if IS_WIN else "x11")).strip().lower()
+#: win32 下是否允许把输入注入真实桌面（默认只读观看）。
+WIN_INPUT = (os.environ.get("DSH_VIEW_INPUT") or "").strip().lower() in ("1", "true", "yes", "on")
+#: 抓帧间隔。win32 是纯本地调用（实测约 34ms/帧），可以贴着页面 130ms 的拉帧节奏来；
+#: X11/Wayland 每次都要起一个外部进程，间隔给大一点，别把 CPU 烧在抓屏上。
+GRAB_INTERVAL = 0.12 if BACKEND == "win32" else 0.5
 #: 协议注入工具（tools/virtual-pointer 编译产物），只在 wayland 后端用得到。
 VPTR = os.environ.get("DSH_VIEW_VPTR") or os.path.join(HOME_DIR, "vptr", "vptr")
 
 
+# ================================================================ win32 后端
+# 只放平台原语：抓一帧、注入一个事件。取舍见文件头「Windows（win32 后端）」。
+if IS_WIN:
+    import ctypes
+    from ctypes import wintypes
+
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    _gdiplus = ctypes.WinDLL("gdiplus", use_last_error=True)
+
+    class _BMIH(ctypes.Structure):
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD)]
+
+    class _BMI(ctypes.Structure):
+        _fields_ = [("bmiHeader", _BMIH), ("bmiColors", wintypes.DWORD * 3)]
+
+    class _GdipStartup(ctypes.Structure):
+        _fields_ = [("GdiplusVersion", ctypes.c_uint32), ("DebugEventCallback", ctypes.c_void_p),
+                    ("SuppressBackgroundThread", ctypes.c_int), ("SuppressExternalCodecs", ctypes.c_int)]
+
+    class _GUID(ctypes.Structure):
+        _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                    ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+
+    class _MOUSEINPUT(ctypes.Structure):
+        _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG), ("mouseData", wintypes.DWORD),
+                    ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                    ("dwExtraInfo", ctypes.c_void_p)]
+
+    class _KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD), ("dwFlags", wintypes.DWORD),
+                    ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_void_p)]
+
+    class _INPUTUNION(ctypes.Union):
+        _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT)]
+
+    class _INPUT(ctypes.Structure):
+        _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
+
+    # 参数类型必须显式声明：64 位下不声明会被按 int 截断成野指针。
+    _user32.GetDC.restype = wintypes.HDC
+    _user32.GetDC.argtypes = [wintypes.HWND]
+    _user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+    _user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+    _user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT), ctypes.c_int]
+    _user32.SendInput.restype = wintypes.UINT
+    _gdi32.CreateCompatibleDC.restype = wintypes.HDC
+    _gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+    _gdi32.CreateDIBSection.restype = wintypes.HBITMAP
+    _gdi32.CreateDIBSection.argtypes = [wintypes.HDC, ctypes.POINTER(_BMI), wintypes.UINT,
+                                        ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD]
+    _gdi32.SelectObject.restype = wintypes.HGDIOBJ
+    _gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+    _gdi32.BitBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                              wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.DWORD]
+    _gdiplus.GdiplusStartup.argtypes = [ctypes.POINTER(ctypes.c_void_p),
+                                        ctypes.POINTER(_GdipStartup), ctypes.c_void_p]
+    _gdiplus.GdipCreateBitmapFromScan0.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                                   ctypes.c_int, ctypes.c_void_p,
+                                                   ctypes.POINTER(ctypes.c_void_p)]
+    _gdiplus.GdipSaveImageToFile.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p,
+                                             ctypes.POINTER(_GUID), ctypes.c_void_p]
+    _gdiplus.GdipDisposeImage.argtypes = [ctypes.c_void_p]
+
+    _SRCCOPY = 0x00CC0020
+    _DIB_RGB_COLORS = 0
+    _BI_RGB = 0
+    _PIXELFORMAT_32BPP_RGB = 0x00022009
+    _SM_CXSCREEN, _SM_CYSCREEN = 0, 1
+    # GDI+ 内置编码器的固定 CLSID
+    _JPEG_CLSID = _GUID(0x557CF401, 0x1A04, 0x11D3,
+                        (ctypes.c_ubyte * 8)(0x9A, 0x73, 0x00, 0x00, 0xF8, 0x1E, 0xF3, 0x2E))
+
+    def _dpi_aware() -> str:
+        """让 GetSystemMetrics/BitBlt 走物理像素；否则缩放屏上抓到的是被拉伸的画面。"""
+        try:
+            if _user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):  # PER_MONITOR_AWARE_V2
+                return "per-monitor-v2"
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
+            if _user32.SetProcessDPIAware():
+                return "system"
+        except Exception:                            # noqa: BLE001
+            pass
+        return "none"
+
+    _DPI_MODE = _dpi_aware()
+
+    # 没显式给尺寸就按真实屏幕来：W/H 是页面抬头和注入坐标换算的共同基准，
+    # 抓多大就写多大，否则点击会落偏。
+    if not os.environ.get("DSH_VIEW_SIZE"):
+        W = int(_user32.GetSystemMetrics(_SM_CXSCREEN))
+        H = int(_user32.GetSystemMetrics(_SM_CYSCREEN))
+
+
+    class WinScreen:
+        """真实桌面的抓帧器：GDI ``BitBlt`` → DIB → GDI+ 编码 JPEG。"""
+
+        def __init__(self) -> None:
+            self.lock = threading.Lock()             # 所有会话共用一块屏，一把锁够了
+            os.makedirs(HOME_DIR, exist_ok=True)
+            self.path = os.path.join(HOME_DIR, "win-frame.jpg")
+            self.token = ctypes.c_void_p()
+            startup = _GdipStartup(1, None, 0, 0)
+            if _gdiplus.GdiplusStartup(ctypes.byref(self.token), ctypes.byref(startup), None) != 0:
+                raise RuntimeError("GdiplusStartup 失败")
+            self.w, self.h = self.size()
+
+        def size(self) -> tuple[int, int]:
+            return (int(_user32.GetSystemMetrics(_SM_CXSCREEN)),
+                    int(_user32.GetSystemMetrics(_SM_CYSCREEN)))
+
+        def grab(self) -> bytes:
+            w, h = self.w, self.h
+            with self.lock:
+                screen_dc = _user32.GetDC(None)
+                mem_dc = _gdi32.CreateCompatibleDC(screen_dc)
+                bmi = _BMI()
+                bmi.bmiHeader.biSize = ctypes.sizeof(_BMIH)
+                bmi.bmiHeader.biWidth = w
+                bmi.bmiHeader.biHeight = -h          # 负数 = 自上而下，与 PNG/JPEG 行序一致
+                bmi.bmiHeader.biPlanes = 1
+                bmi.bmiHeader.biBitCount = 32
+                bmi.bmiHeader.biCompression = _BI_RGB
+                bits = ctypes.c_void_p()
+                hbmp = _gdi32.CreateDIBSection(screen_dc, ctypes.byref(bmi), _DIB_RGB_COLORS,
+                                               ctypes.byref(bits), None, 0)
+                old = _gdi32.SelectObject(mem_dc, hbmp)
+                try:
+                    if not _gdi32.BitBlt(mem_dc, 0, 0, w, h, screen_dc, 0, 0, _SRCCOPY):
+                        return b""
+                    bmp = ctypes.c_void_p()
+                    st = _gdiplus.GdipCreateBitmapFromScan0(w, h, w * 4, _PIXELFORMAT_32BPP_RGB,
+                                                            bits, ctypes.byref(bmp))
+                    if st != 0:
+                        print(f"[win32] GdipCreateBitmapFromScan0 失败：{st}", flush=True)
+                        return b""
+                    try:
+                        st = _gdiplus.GdipSaveImageToFile(bmp, self.path,
+                                                          ctypes.byref(_JPEG_CLSID), None)
+                        if st != 0:
+                            print(f"[win32] GdipSaveImageToFile 失败：{st}", flush=True)
+                            return b""
+                    finally:
+                        _gdiplus.GdipDisposeImage(bmp)
+                    with open(self.path, "rb") as fh:
+                        return fh.read()
+                finally:
+                    _gdi32.SelectObject(mem_dc, old)
+                    _gdi32.DeleteObject(hbmp)
+                    _gdi32.DeleteDC(mem_dc)
+                    _user32.ReleaseDC(None, screen_dc)
+
+    # ------------------------------------------------------------ 输入注入
+    _INPUT_MOUSE, _INPUT_KEYBOARD = 0, 1
+    _MEF_MOVE, _MEF_ABSOLUTE = 0x0001, 0x8000
+    _MEF_LEFTDOWN, _MEF_LEFTUP = 0x0002, 0x0004
+    _MEF_RIGHTDOWN, _MEF_RIGHTUP = 0x0008, 0x0010
+    _MEF_MIDDLEDOWN, _MEF_MIDDLEUP = 0x0020, 0x0040
+    _MEF_WHEEL = 0x0800
+    _KEF_EXTENDED, _KEF_KEYUP, _KEF_UNICODE = 0x0001, 0x0002, 0x0004
+    _WHEEL_DELTA = 120
+
+    #: DOM 键名 → Windows 虚拟键码（VK）。
+    _VK = {
+        "Enter": 0x0D, "Backspace": 0x08, "Delete": 0x2E, "Tab": 0x09, "Escape": 0x1B,
+        " ": 0x20, "ArrowUp": 0x26, "ArrowDown": 0x28, "ArrowLeft": 0x25, "ArrowRight": 0x27,
+        "Home": 0x24, "End": 0x23, "PageUp": 0x21, "PageDown": 0x22,
+        "ctrl+": 0x11, "shift+": 0x10, "alt+": 0x12, "super+": 0x5B,
+    }
+
+    def _send_inputs(items: list[_INPUT]) -> int:
+        if not items:
+            return 0
+        arr = (_INPUT * len(items))(*items)
+        return int(_user32.SendInput(len(items), arr, ctypes.sizeof(_INPUT)))
+
+    def _win_mouse(px: int, py: int, flags: int, data: int = 0) -> int:
+        """绝对坐标要走 0..65535 归一化；先把光标定位再按键，避免点错位置。"""
+        sw, sh = max(1, W - 1), max(1, H - 1)
+        nx, ny = int(px * 65535 / sw), int(py * 65535 / sh)
+        items = []
+        if flags & (_MEF_LEFTDOWN | _MEF_RIGHTDOWN | _MEF_MIDDLEDOWN):
+            items.append(_INPUT(_INPUT_MOUSE, _INPUTUNION(mi=_MOUSEINPUT(
+                nx, ny, 0, _MEF_MOVE | _MEF_ABSOLUTE, 0, None))))
+        items.append(_INPUT(_INPUT_MOUSE, _INPUTUNION(mi=_MOUSEINPUT(
+            nx, ny, data, flags, 0, None))))
+        return _send_inputs(items)
+
+    def _win_text(text: str) -> int:
+        """任意 Unicode 直接走 KEYEVENTF_UNICODE —— 中文不用剪贴板，比 X11 那条路省事。"""
+        items = []
+        for ch in text:
+            code = ord(ch)
+            if code > 0xFFFF:                        # 非 BMP 走代理对
+                code -= 0x10000
+                pairs = [0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF)]
+            else:
+                pairs = [code]
+            for unit in pairs:
+                items.append(_INPUT(_INPUT_KEYBOARD, _INPUTUNION(ki=_KEYBDINPUT(
+                    0, unit, _KEF_UNICODE, 0, None))))
+                items.append(_INPUT(_INPUT_KEYBOARD, _INPUTUNION(ki=_KEYBDINPUT(
+                    0, unit, _KEF_UNICODE | _KEF_KEYUP, 0, None))))
+        return _send_inputs(items)
+
+    def _win_key(key: str) -> int:
+        mods, base = [], key
+        for prefix in ("ctrl+", "super+", "alt+", "shift+"):
+            while base.startswith(prefix):
+                mods.append(_VK[prefix])
+                base = base[len(prefix):]
+        vk = _VK.get(base)
+        if vk is None and len(base) == 1:
+            vk = _user32.VkKeyScanW(ctypes.c_wchar(base)) & 0xFF
+        if not vk:
+            return 0
+        items = [_INPUT(_INPUT_KEYBOARD, _INPUTUNION(ki=_KEYBDINPUT(m, 0, 0, 0, None))) for m in mods]
+        items.append(_INPUT(_INPUT_KEYBOARD, _INPUTUNION(ki=_KEYBDINPUT(vk, 0, 0, 0, None))))
+        items.append(_INPUT(_INPUT_KEYBOARD, _INPUTUNION(ki=_KEYBDINPUT(vk, 0, _KEF_KEYUP, 0, None))))
+        items += [_INPUT(_INPUT_KEYBOARD, _INPUTUNION(ki=_KEYBDINPUT(m, 0, _KEF_KEYUP, 0, None)))
+                  for m in reversed(mods)]
+        return _send_inputs(items)
+
+    def _win_windows() -> int:
+        """可见的顶层窗口数（用于页面的"空闲"提示）。"""
+        count = 0
+        enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def callback(hwnd, _lparam):
+            nonlocal count
+            if _user32.IsWindowVisible(hwnd):
+                length = _user32.GetWindowTextLengthW(hwnd)
+                if length > 0:
+                    count += 1
+            return True
+
+        try:
+            _user32.EnumWindows(enum_proc(callback), 0)
+        except Exception:                            # noqa: BLE001
+            return -1
+        return count
+
+    _WIN_SCREEN: "WinScreen | None" = None
+    _WIN_SCREEN_LOCK = threading.Lock()
+
+    def win_screen() -> "WinScreen":
+        global _WIN_SCREEN
+        with _WIN_SCREEN_LOCK:
+            if _WIN_SCREEN is None:
+                _WIN_SCREEN = WinScreen()
+            return _WIN_SCREEN
+
+
+
 class Session:
-    """一个 harness 会话独占的显示（X11 默认；wayland 为备用后端）。"""
+    """一个 harness 会话独占的显示（X11 默认；wayland / win32 为备用后端）。"""
 
     def __init__(self, sid: str) -> None:
         self.sid = sid
@@ -80,10 +361,14 @@ class Session:
         # 显示号由会话名稳定推导 —— 用 crc32 而不是 hash()：后者每个进程都加盐，
         # 重启服务后显示号会变，会话里的程序就找不回自己的显示了。
         self.number = 100 + (zlib.crc32(sid.encode("utf-8")) % 300)
-        self.display = f":{self.number}"
+        # win32 上没有"这一路的显示号"——所有会话看的都是同一块真实桌面。
+        self.display = "真实桌面" if BACKEND == "win32" else f":{self.number}"
 
     # ------------------------------------------------------------------ 启动
     def ensure(self) -> bool:
+        if BACKEND == "win32":
+            self.started = True                      # 真实桌面，没有要拉起的显示服务器
+            return True
         if self.started and self._alive():
             return True
         with self._boot_lock:
@@ -105,6 +390,8 @@ class Session:
         于是"文件在、服务没了"，后续抓帧/注入全部失败（实测踩过：一堆遗留 Xvfb
         造成了难以理解的怪现象）。这里实际连一次确认。
         """
+        if BACKEND == "win32":
+            return True                              # 真实桌面永远"在"
         if BACKEND == "wayland":
             return os.path.exists(os.path.join(self.runtime, "wayland-1"))
         if not os.path.exists(f"/tmp/.X11-unix/X{self.number}"):
@@ -164,6 +451,8 @@ class Session:
     @property
     def env(self) -> dict:
         """在该会话显示上跑程序时应使用的环境。"""
+        if BACKEND == "win32":
+            return dict(os.environ)                  # 真实桌面：原样用当前环境
         if BACKEND == "wayland":
             return {**os.environ, "XDG_RUNTIME_DIR": self.runtime,
                     "WAYLAND_DISPLAY": "wayland-1"}
@@ -208,7 +497,12 @@ def _install_signal_handlers() -> None:
         _cleanup_spawned()
         raise SystemExit(0)
 
-    for sig in (_signal.SIGTERM, _signal.SIGINT, _signal.SIGHUP):
+    # Windows 补丁（原写法把 SIGHUP 放进元组字面量，求值发生在 try 之外，
+    # Windows 没有 signal.SIGHUP -> 服务在绑端口之前就 AttributeError 崩掉）。
+    for _name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        sig = getattr(_signal, _name, None)
+        if sig is None:
+            continue
         try:
             _signal.signal(sig, handler)
         except Exception:                            # noqa: BLE001
@@ -262,6 +556,9 @@ def inject(sess: Session, obj: dict) -> None:
         return
     if BACKEND == "wayland":
         _inject_wayland(sess, obj)
+        return
+    if BACKEND == "win32":
+        _inject_win32(sess, obj)
         return
     kind = obj.get("t")
     x, y = obj.get("x"), obj.get("y")
@@ -317,6 +614,46 @@ def _type_text(sess: Session, text: str) -> None:
     run_tool(sess, ["xdotool", "key", "--clearmodifiers", "ctrl+v"])
 
 
+def _inject_win32(sess: Session, obj: dict) -> None:
+    """把事件注入**真实桌面**。
+
+    ⚠️ 默认关闭（``DSH_VIEW_INPUT=1`` 才开）：Windows 上没有独立的虚拟显示，
+    注入的就是用户本人的鼠标键盘，误开会在用户正在用的桌面上真点下去。
+    """
+    if not WIN_INPUT:
+        return
+    kind = obj.get("t")
+    x, y = obj.get("x"), obj.get("y")
+    if kind in ("click", "move") and x is not None and y is not None:
+        px, py = int(float(x) * W), int(float(y) * H)
+        down, up = {1: (_MEF_LEFTDOWN, _MEF_LEFTUP),
+                    2: (_MEF_MIDDLEDOWN, _MEF_MIDDLEUP),
+                    3: (_MEF_RIGHTDOWN, _MEF_RIGHTUP)}.get(
+                        int(obj.get("b") or 1), (_MEF_LEFTDOWN, _MEF_LEFTUP))
+        flags = (_MEF_MOVE | _MEF_ABSOLUTE) if kind == "move" else down
+        if _win_mouse(px, py, flags) == 0:
+            print(f"[{sess.sid}] SendInput 失败：{ctypes.get_last_error()}", flush=True)
+            return
+        if kind == "click":
+            time.sleep(0.02)
+            _win_mouse(px, py, up)
+    elif kind == "wheel":
+        dy = float(obj.get("dy") or 0)
+        delta = _WHEEL_DELTA if dy > 0 else -_WHEEL_DELTA
+        for _ in range(min(10, max(1, int(abs(dy) / _WHEEL_DELTA) or 1))):
+            _send_inputs([_INPUT(_INPUT_MOUSE, _INPUTUNION(
+                mi=_MOUSEINPUT(0, 0, delta, _MEF_WHEEL, 0, None)))])
+    elif kind == "text":
+        text = str(obj.get("s") or "")
+        if text:
+            time.sleep(0.1)                          # 与 X11 那条路同样的余量
+            _win_text(text)
+    elif kind == "key":
+        key = str(obj.get("k") or "")
+        if key:
+            _win_key(key)
+
+
 def _inject_wayland(sess: Session, obj: dict) -> None:
     """备用后端：Wayland 下的注入（协议工具优先，ydotool 兜底）。"""
     kind = obj.get("t")
@@ -353,6 +690,8 @@ def _inject_wayland(sess: Session, obj: dict) -> None:
 
 # ---------------------------------------------------------------- 抓帧
 def _grab_once(sess: Session) -> bytes:
+    if BACKEND == "win32":
+        return win_screen().grab()
     if BACKEND == "wayland":
         cmd = ["grim", "-t", "jpeg", "-q", "80", "-"]
     else:
@@ -372,14 +711,14 @@ def _grab_loop(sess: Session) -> None:
                         sess.latest = frame
             except Exception:                        # noqa: BLE001
                 pass
-        time.sleep(0.5)
+        time.sleep(GRAB_INTERVAL)
 
 
 # ---------------------------------------------------------------- 页面
 PAGE = """<!doctype html><meta charset=utf-8><title>DSH 显示器 · {sid}</title>
 <body style="margin:0;background:#0b0b0c;color:#ddd;font:12px system-ui">
 <div style="padding:4px 8px;opacity:.75">
-  会话 {sid} 的显示器 · 独立显示 {display} · {w}x{h} · 点击画面即可操作（鼠标/键盘都会注入回去）
+  会话 {sid} 的显示器 · {disp} · {w}x{h} · {note}
 </div>
 <canvas id="screen" style="width:100%;display:block;cursor:crosshair"></canvas>
 <div id="offline" style="display:none;padding:10px;opacity:.7">正在连接显示器…</div>
@@ -545,15 +884,29 @@ class Handler(BaseHTTPRequestHandler):
             rows = "".join(
                 f'<li><a href="/s/{k}/">{k}</a> · {v.display} '
                 f'{"（就绪）" if v.started else "（未启动）"}</li>' for k, v in items)
+            if BACKEND == "win32":
+                howto = ("<p style='opacity:.65'>本机是 Windows：没有 Xvfb 这类可多开的 "
+                         "headless 显示，win32 后端抓的是<strong>真实桌面</strong> —— "
+                         "所有会话看到的是同一块屏。<br>"
+                         "输入注入：" + ("<strong>已开启</strong>（DSH_VIEW_INPUT=1）"
+                                        "，页面上的点击/按键会落在真实桌面上。"
+                                        if WIN_INPUT else
+                                        "默认<strong>关闭</strong>（只读观看），"
+                                        "要开就带 <code>DSH_VIEW_INPUT=1</code> 重启本服务。")
+                         + "</p>")
+                title = "DSH 显示器（Windows · 真实桌面）"
+            else:
+                howto = ("<p style='opacity:.65'>每个 harness 会话有自己的显示："
+                         "<code>/s/&lt;sessionId&gt;/</code> —— 互不可见、互不污染。<br>"
+                         "在该会话显示上跑程序："
+                         "<code>DISPLAY=:&lt;号&gt; QT_QPA_PLATFORM=xcb 程序</code></p>")
+                title = "DSH 测试显示器（每会话独立）"
             self._send(
                 ("<!doctype html><meta charset=utf-8><title>DSH 显示器</title>"
                  "<body style='background:#0b0b0c;color:#ddd;font:13px system-ui;padding:16px'>"
-                 "<h3>DSH 测试显示器（每会话独立）</h3>"
+                 f"<h3>{title}</h3>"
                  f"<ul>{rows or '<li>（暂无会话）</li>'}</ul>"
-                 "<p style='opacity:.65'>每个 harness 会话有自己的显示："
-                 "<code>/s/&lt;sessionId&gt;/</code> —— 互不可见、互不污染。<br>"
-                 "在该会话显示上跑程序："
-                 "<code>DISPLAY=:&lt;号&gt; QT_QPA_PLATFORM=xcb 程序</code></p>").encode(),
+                 f"{howto}").encode(),
                 "text/html; charset=utf-8")
             return
 
@@ -596,7 +949,9 @@ class Handler(BaseHTTPRequestHandler):
             # 用户一眼就能分清（反复被"一片漆黑"困惑过）。
             sess.ensure()
             count = -1
-            if BACKEND != "wayland":
+            if BACKEND == "win32":
+                count = _win_windows()               # 真实桌面上永远有窗口，不会误报"空闲"
+            elif BACKEND != "wayland":
                 try:
                     out = subprocess.run(["xdotool", "search", "--name", "."],
                                          env=sess.env, capture_output=True, timeout=8)
@@ -617,17 +972,48 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json")
             return
         sess.ensure()
-        self._send(PAGE.format(base=f"/s/{sid}", sid=sid, display=sess.display,
-                               w=W, h=H).encode(), "text/html; charset=utf-8")
+        if BACKEND == "win32":
+            disp = "真实桌面（所有会话共用）"
+            note = ("点击画面即可操作（会注入到本机真实的鼠标键盘）" if WIN_INPUT
+                    else "只读观看 —— 未开启输入注入（DSH_VIEW_INPUT=1 可开）")
+        else:
+            disp = f"独立显示 {sess.display}"
+            note = "点击画面即可操作（鼠标/键盘都会注入回去）"
+        self._send(PAGE.format(base=f"/s/{sid}", sid=sid, disp=disp,
+                               w=W, h=H, note=note).encode(),
+                   "text/html; charset=utf-8")
+
+
+def _redirect_log() -> None:
+    """把输出落到文件（``DSH_VIEW_LOG``）。
+
+    无控制台启动时用得上：Windows 上便携包用 ``pythonw.exe`` 起服务（不留黑框），
+    那样 stdout 是空设备，启动失败就什么线索都没有。systemd 那边本来就是 journal，
+    不受影响。打开失败就算了 —— 日志绝不该拦住服务本身。
+    """
+    path = os.environ.get("DSH_VIEW_LOG")
+    if not path:
+        return
+    try:
+        stream = open(path, "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stderr = stream
+    except Exception:                                # noqa: BLE001
+        pass
 
 
 def main() -> None:
     import atexit
 
+    _redirect_log()
     _install_signal_handlers()
     atexit.register(_cleanup_spawned)
-    print(f"viewer on http://127.0.0.1:{PORT}/ · 后端 {BACKEND} · 每会话独立 "
-          f"（/s/<sessionId>/）· {W}x{H} · 支持双向注入", flush=True)
+    if BACKEND == "win32":
+        print(f"viewer on http://127.0.0.1:{PORT}/ · 后端 win32（真实桌面 {W}x{H}，"
+              f"DPI {_DPI_MODE}）· 所有会话共用这块屏 · "
+              f"输入注入{'已开启' if WIN_INPUT else '关闭（只读）'}", flush=True)
+    else:
+        print(f"viewer on http://127.0.0.1:{PORT}/ · 后端 {BACKEND} · 每会话独立 "
+              f"（/s/<sessionId>/）· {W}x{H} · 支持双向注入", flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
 
 
