@@ -26,6 +26,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent
@@ -243,6 +244,20 @@ def main(argv: list[str] | None = None) -> int:
     # 一旦引擎初始化就读不到了），翻译器则在 QApplication **之后**装。
     i18n.prepare_environment()
     app = QApplication(sys.argv[:1])
+
+    # 顺手把「显示器」服务拉起来：面板要有画面就得靠它。用户常常装好插件却从没启动
+    # 过服务，于是面板永远停在「显示器还没有打开」（真实反馈过）。放后台线程，
+    # 不拖慢启动；失败只记一条日志 —— 它只是顺手帮忙，不是控制台的依赖。
+    def _ensure_display() -> None:
+        try:
+            from . import display as _display
+
+            note = _display.ensure()
+            print(f"显示器服务：{note}", flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    threading.Thread(target=_ensure_display, daemon=True).start()
     _translators = i18n.install_translators(app)      # 必须保持引用，否则翻译失效
     app.setApplicationName("DSH 控制台")
     app.setApplicationDisplayName("DSH 控制台")
