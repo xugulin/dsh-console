@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QFrame,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -59,6 +61,43 @@ def _label(text: str, theme: Theme) -> QLabel:
     return lab
 
 
+def _scrollable(dialog: QDialog, margins: tuple[int, int, int, int] = (20, 18, 20, 12),
+                spacing: int = 10):
+    """把对话框内容放进**滚动区**，返回 (内容布局, 底部按钮容器)。
+
+    为什么需要：这些对话框的内容高度是固定的（两张表格 230/180px + 若干卡片，合计
+    约 750px）。窗口一旦被压得比内容矮（小屏、或 apply_screen_fit 缩过），Qt 就会
+    把控件**压扁**——用户实测过"控件因高度问题压缩变扁、显示不完整"。
+    放进 QScrollArea 后：窗口再小也只会出现滚动条，控件保持应有的尺寸。
+
+    按钮用**独立的一行**固定在底部（不跟着滚动），这样内容再长也够得着保存/关闭。
+    """
+    outer = QVBoxLayout(dialog)
+    outer.setContentsMargins(0, 0, 0, 0)
+    outer.setSpacing(0)
+
+    scroll = QScrollArea(dialog)
+    scroll.setWidgetResizable(True)          # 宽度跟随窗口；高度不够就出滚动条
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    scroll.setObjectName("SourceDialogScroll")
+
+    content = QWidget()
+    root = QVBoxLayout(content)
+    root.setContentsMargins(*margins)
+    root.setSpacing(spacing)
+    scroll.setWidget(content)
+    outer.addWidget(scroll, 1)
+
+    footer = QHBoxLayout()
+    footer.setContentsMargins(margins[0], 4, margins[2], 14)
+    outer.addLayout(footer)
+
+    dialog._source_scroll = scroll     # 便于自检/调试
+    return root, footer
+
+
 class PluginSourceDialog(QDialog):
     """插件市场的数据源设置。"""
 
@@ -67,7 +106,8 @@ class PluginSourceDialog(QDialog):
     def __init__(self, theme: Theme, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("插件市场 · 数据源设置")
-        apply_screen_fit(self, (860, 640), (620, 480))
+        # 内容约 750px 高：默认给足，最小尺寸放小 —— 放小的部分由滚动区承担
+        apply_screen_fit(self, (900, 760), (560, 420))
         self.theme = theme
         self.cfg = sources.load()
         self._probe_results: list = []
@@ -75,9 +115,7 @@ class PluginSourceDialog(QDialog):
         self._reload()
 
     def _build(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 16)
-        root.setSpacing(10)
+        root, footer = _scrollable(self)
 
         root.addWidget(_hint(
             "区域口径与已安装的 dshmarket 插件一致；环境变量（DSHM_NPM_MIRROR / "
@@ -177,12 +215,13 @@ class PluginSourceDialog(QDialog):
         self.status = _hint("", self.theme)
         root.addWidget(self.status)
 
+        footer.addStretch(1)          # 按钮靠右，与 Qt 默认观感一致
         box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Close)
         box.button(QDialogButtonBox.Save).setText("保存并应用")
         box.button(QDialogButtonBox.Close).setText("关闭")
         box.accepted.connect(self._save)
         box.rejected.connect(self.reject)
-        root.addWidget(box)
+        footer.addWidget(box)
 
         self.btn_probe.clicked.connect(self._probe)
         self.btn_best.clicked.connect(self._apply_best)
@@ -352,15 +391,13 @@ class SkillSourceDialog(QDialog):
     def __init__(self, theme: Theme, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("技能市场 · 市场源设置")
-        apply_screen_fit(self, (680, 520), (540, 420))
+        apply_screen_fit(self, (720, 620), (500, 380))
         self.theme = theme
         self._sources = sources.read_skill_sources()
         self._build()
 
     def _build(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 16)
-        root.setSpacing(10)
+        root, footer = _scrollable(self)
 
         root.addWidget(_hint(
             "与技能中枢共享同一份列表（读写 ~/.dsh/dsh-skill-hub.json 的 marketSources），"
@@ -409,10 +446,11 @@ class SkillSourceDialog(QDialog):
         root.addWidget(self.status)
         root.addStretch(1)
 
+        footer.addStretch(1)
         box = QDialogButtonBox(QDialogButtonBox.Close)
         box.button(QDialogButtonBox.Close).setText("关闭")
         box.rejected.connect(self.reject)
-        root.addWidget(box)
+        footer.addWidget(box)
 
         btn_add.clicked.connect(lambda: self._add(self.new_edit.text()))
         btn_del.clicked.connect(self._del)
