@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# ⚠️ 规范位置：https://github.com/xugulin/dsh-display-panel
+#    （插件本体、显示器服务、systemd 单元都在那个仓库；这里是开发副本，
+#      改动时以插件仓库为准，改完再同步回来，别只改一边。）
 """DSH 测试显示器：**每个 harness 会话一台完全独立的显示**，能看画面，也能把
 浏览器里的鼠标/键盘操作注入回去。
 

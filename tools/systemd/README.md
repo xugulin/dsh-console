@@ -1,5 +1,7 @@
 # systemd 用户单元
 
+> ⚠️ 规范位置：https://github.com/xugulin/dsh-display-panel（`service/` 目录下，含 install-service.sh 一键安装）—— 这里保留作为开发副本。
+
 ## dsh-display-viewer.service —— DSH 测试显示器服务
 
 **为什么必须独立成一个服务**：早先 viewer 与它拉起的 Xvfb 是从 shell 里启动的，
