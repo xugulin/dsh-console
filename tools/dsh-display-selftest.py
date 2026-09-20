@@ -16,12 +16,37 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
 import urllib.request
 
 BASE = "http://127.0.0.1:8099"
+
+#: 服务现在要求带 per-user 令牌（同机其他用户拿不到，见「多用户隔离」）。
+#: 本脚本以该用户身份运行，所以直接读令牌文件即可。
+def _token() -> str:
+    for cand in (os.path.expanduser("~/.cache/dsh-display/token"),
+                 os.environ.get("DSH_DISPLAY_HOME", "") and
+                 os.path.join(os.environ["DSH_DISPLAY_HOME"], "token")):
+        try:
+            with open(cand, encoding="utf-8") as fh:
+                value = fh.read().strip()
+            if value:
+                return value
+        except OSError:
+            continue
+    return ""
+
+
+TOKEN = _token()
+
+
+def _with_token(path: str) -> str:
+    if not TOKEN:
+        return path
+    return path + ("&" if "?" in path else "?") + "k=" + TOKEN
 PY = "/home/xgl/python/python3147uv/bin/python"
 ISO = "/home/xgl/.cache/dsh-display"
 RESULTS: list[tuple[str, bool, str]] = []
@@ -34,7 +59,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 def get(path: str, timeout: float = 20) -> tuple[int, bytes]:
     try:
-        with urllib.request.urlopen(BASE + path, timeout=timeout) as r:
+        with urllib.request.urlopen(BASE + _with_token(path), timeout=timeout) as r:
             return r.status, r.read()
     except Exception as exc:                          # noqa: BLE001
         return 0, str(exc).encode()
@@ -42,7 +67,8 @@ def get(path: str, timeout: float = 20) -> tuple[int, bytes]:
 
 def post(path: str, obj: dict) -> bool:
     try:
-        req = urllib.request.Request(BASE + path, data=json.dumps(obj).encode(), method="POST")
+        req = urllib.request.Request(BASE + _with_token(path),
+                                     data=json.dumps(obj).encode(), method="POST")
         with urllib.request.urlopen(req, timeout=15) as r:
             return r.status == 200 and json.loads(r.read() or b"{}").get("ok") is True
     except Exception:                                 # noqa: BLE001
