@@ -353,6 +353,10 @@ PAGE = """<!doctype html><meta charset=utf-8><title>DSH 显示器 · {sid}</titl
 </div>
 <canvas id="screen" style="width:100%;display:block;cursor:crosshair"></canvas>
 <div id="offline" style="display:none;padding:10px;opacity:.7">正在连接显示器…</div>
+<div id="idle" style="display:none;position:fixed;left:0;right:0;bottom:12px;text-align:center;
+     font-size:12px;opacity:.45;pointer-events:none">
+  显示器空闲 —— 这台显示上还没有程序在运行（让 AI 帮你拉起来即可）
+</div>
 <textarea id="sink" aria-label="keyboard sink"
   style="position:fixed;left:-1000px;top:0;width:10px;height:10px;opacity:0"></textarea>
 <script>
@@ -381,6 +385,17 @@ PAGE = """<!doctype html><meta charset=utf-8><title>DSH 显示器 · {sid}</titl
     im.src = BASE + '/snapshot?t=' + Date.now();
   }})();
   var img = canvas;
+  // 空闲提示：每 2 秒问一次该显示上有几个窗口；没有窗口就提示，避免"全黑=坏了"的误解
+  (function pollState() {{
+    fetch(BASE + '/state?t=' + Date.now(), {{ cache: 'no-store' }})
+      .then(function (r) {{ return r.json(); }})
+      .then(function (d) {{
+        document.getElementById('idle').style.display =
+          (d && d.idle === true) ? 'block' : 'none';
+      }})
+      .catch(function () {{}})
+      .then(function () {{ setTimeout(pollState, 2000); }});
+  }})();
   var sink = document.getElementById('sink');
   function norm(ev) {{
     var r = img.getBoundingClientRect();
@@ -545,6 +560,22 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 time.sleep(0.25)
             self.send_error(503, "no frame yet")
+            return
+        if rest == "/state":
+            # 供页面判断"这台显示上有没有程序在跑" —— 全黑时到底是空闲还是坏了，
+            # 用户一眼就能分清（反复被"一片漆黑"困惑过）。
+            sess.ensure()
+            count = -1
+            if BACKEND != "wayland":
+                try:
+                    out = subprocess.run(["xdotool", "search", "--name", "."],
+                                         env=sess.env, capture_output=True, timeout=8)
+                    count = len([ln for ln in out.stdout.decode().splitlines() if ln.strip()])
+                except Exception:                    # noqa: BLE001
+                    count = -1
+            self._send(json.dumps({"session": sid, "display": sess.display,
+                                   "windows": count, "idle": count == 0}).encode(),
+                       "application/json")
             return
         if rest == "/display":
             # 便于脚本查询"这个会话的显示号是多少"。
