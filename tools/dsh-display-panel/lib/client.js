@@ -1,11 +1,10 @@
 /**
  * dsh-display-panel — 浏览器半边：在「对话 / 轨迹 / 浏览器」那一排里加一个「显示器」标签。
  *
- * 每个 harness 会话看**自己那一路**显示：/s/<sessionId>/ —— 互不可见、互不污染
- * （早先所有会话共用一台显示，别的项目的窗口会混进来）。
+ * 构建标记：2026-09-20b（面板会把它显示出来，便于判断浏览器里加载的是哪一版 ——
+ * 插件 JS 会被浏览器与宿主缓存，排查时"到底跑的哪一版"必须先确定）。
  *
- * 纯 JavaScript（和 dsh-browser-panel 一样）：模块加载器工厂不依赖构建步骤，
- * 除了宿主提供的 React 之外不依赖任何 npm 包。
+ * 每个 harness 会话看**自己那一路**显示：/s/<sessionId>/ —— 互不可见、互不污染。
  */
 window.__ModuleLoader__.load({
   id: 'dsh-display-panel',
@@ -15,6 +14,7 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     const PANEL_ID = 'display-panel'
+    const BUILD = '2026-09-20b'
     /** 显示器服务地址；每个会话在 /s/<sessionId>/ 下有自己的一路。 */
     const VIEWER = 'http://127.0.0.1:8099'
     /** 探测间隔：显示器是外部进程，随时可能起停。 */
@@ -22,12 +22,12 @@ window.__ModuleLoader__.load({
 
     const TEXT = {
       empty: '显示器还没有打开',
-      emptyHint: '打开后这里就是我在虚拟显示上的实时画面（只读约 1.5 帧/秒，可点击、可输入）。'
+      emptyHint: '打开后这里就是我在虚拟显示上的实时画面（约 7~8 帧/秒，可点击、可输入）。'
         + '每个会话有自己独立的一台显示，别的会话看不到这里的画面。',
       open: '重新检测',
       checking: '正在检查显示器…',
       retryHint: '需要打开时告诉我一声（AI 会拉起这台显示），或自己执行：'
-        + ' python3 tools/dsh-display-viewer.py',
+        + ' systemctl --user start dsh-display-viewer',
       noSession: '这里拿不到会话 id，无法确定这个面板对应哪台显示。',
     }
 
@@ -43,6 +43,7 @@ window.__ModuleLoader__.load({
       .ddp-title { font-size: 15px; font-weight: 600; }
       .ddp-note { font-size: 12.5px; line-height: 1.75; opacity: .72; max-width: 560px; }
       .ddp-hint { font-size: 11.5px; opacity: .5; max-width: 620px; word-break: break-all; }
+      .ddp-build { font-size: 10.5px; opacity: .35; }
       .ddp-primary {
         margin-top: 2px; padding: 7px 16px; font: inherit; font-size: 12.5px;
         border-radius: 8px; cursor: pointer; color: inherit;
@@ -67,7 +68,10 @@ window.__ModuleLoader__.load({
       const [state, setState] = useState('checking')   // checking | ready | empty
       const [nonce, setNonce] = useState(0)
 
-      useEffect(() => { ensureStyle() }, [])
+      useEffect(() => {
+        ensureStyle()
+        try { console.log('[dsh-display-panel] build', BUILD, 'sid', sid) } catch (e) {}
+      }, [sid])
 
       useEffect(() => {
         if (!base) { setState('empty'); return undefined }
@@ -87,7 +91,9 @@ window.__ModuleLoader__.load({
 
       if (!sid) {
         return h('div', { className: 'ddp-root' },
-          h('div', { className: 'ddp-empty' }, h('div', { className: 'ddp-note' }, TEXT.noSession)))
+          h('div', { className: 'ddp-empty' },
+            h('div', { className: 'ddp-note' }, TEXT.noSession),
+            h('div', { className: 'ddp-build' }, 'build ' + BUILD)))
       }
       if (state === 'ready') {
         return h('div', { className: 'ddp-root' },
@@ -95,12 +101,14 @@ window.__ModuleLoader__.load({
             key: nonce,
             className: 'ddp-frame',
             src: base + cacheBust,
-            title: 'DSH 显示器 · ' + sid,
+            title: 'DSH 显示器 · ' + sid + ' · ' + BUILD,
           }))
       }
       if (state === 'checking') {
         return h('div', { className: 'ddp-root' },
-          h('div', { className: 'ddp-empty' }, h('div', { className: 'ddp-note' }, TEXT.checking)))
+          h('div', { className: 'ddp-empty' },
+            h('div', { className: 'ddp-note' }, TEXT.checking),
+            h('div', { className: 'ddp-build' }, 'build ' + BUILD)))
       }
       return h('div', { className: 'ddp-root' },
         h('div', { className: 'ddp-empty' },
@@ -110,13 +118,14 @@ window.__ModuleLoader__.load({
             type: 'button', className: 'ddp-primary',
             onClick: () => { setState('checking'); setNonce((n) => n + 1) },
           }, TEXT.open),
-          h('div', { className: 'ddp-hint' }, TEXT.retryHint)))
+          h('div', { className: 'ddp-hint' }, TEXT.retryHint),
+          h('div', { className: 'ddp-build' }, 'build ' + BUILD)))
     }
 
     const apply = (ctx) => {
       try {
-        // ⚠️ 必须先 slots.inject 等声明再 register；并且 inject 里带上 sessionId ——
-        // 面板才知道该显示**哪个会话**的那台显示。
+        // ⚠️ 必须先 slots.inject 等声明再 register；inject 里带上 sessionId —— 面板才知道
+        // 该显示**哪个会话**的那台显示（写法同 dsh-browser-panel）。
         ctx.slots.inject('conversation.view', () =>
           ctx.slots.register(
             {
