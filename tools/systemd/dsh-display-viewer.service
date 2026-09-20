@@ -1,0 +1,19 @@
+[Unit]
+Description=DSH 测试显示器（每会话独立的 Xvfb + MJPEG/画布服务）
+Documentation=https://github.com/xugulin/dsh-console/blob/main/tools/dsh-display-BACKENDS.md
+# 独立于 dsh-web.service：harness 重启会按 cgroup 连带杀掉同一 cgroup 里的进程，
+# 早先 viewer 与它拉起的 Xvfb 就是这样一起消失的（面板于是显示"显示器还没有打开"）。
+
+[Service]
+Type=simple
+WorkingDirectory=/home/xgl/python/DeepSeekHarness控制台
+Environment=DSH_VIEW_PORT=8099
+Environment=DSH_VIEW_BACKEND=x11
+ExecStart=/home/xgl/python/python3147uv/bin/python /home/xgl/python/DeepSeekHarness控制台/tools/dsh-display-viewer.py
+Restart=always
+RestartSec=3
+# 只清理本服务自己的进程，别碰 harness
+KillMode=process
+
+[Install]
+WantedBy=default.target
