@@ -3,11 +3,11 @@
   "_用途": "便携包里「检查控制台更新」默认就读这个文件（走 raw 域名，几十字节，很快）：https://raw.githubusercontent.com/xugulin/dsh-console/main/version.json",
   "_发版时必须同步": "改 dsh_console/__init__.py 的 __version__ → 改这里的 版本/标签/资产 → 重新打包 → 建 vX.Y.Z 的 Release 并把两个 zip 传上去。",
   "名称": "DSH-Console",
-  "版本": "1.1.5",
-  "标签": "v1.1.5",
+  "版本": "1.1.6",
+  "标签": "v1.1.6",
   "发布页": "https://github.com/xugulin/dsh-console/releases",
   "资产": {
-    "linux": "DSH-Console-1.1.5-Linux.zip",
-    "win": "DSH-Console-1.1.5-Windows.zip"
+    "linux": "DSH-Console-1.1.6-Linux.zip",
+    "win": "DSH-Console-1.1.6-Windows.zip"
   }
 }
