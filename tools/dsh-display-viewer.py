@@ -310,13 +310,36 @@ PAGE = """<!doctype html><meta charset=utf-8><title>DSH 显示器 · {sid}</titl
 <div style="padding:4px 8px;opacity:.75">
   会话 {sid} 的显示器 · 独立显示 {display} · {w}x{h} · 点击画面即可操作（鼠标/键盘都会注入回去）
 </div>
-<img id="screen" src="{base}/stream" style="width:100%;display:block;cursor:crosshair">
+<canvas id="screen" style="width:100%;display:block;cursor:crosshair"></canvas>
+<div id="offline" style="display:none;padding:10px;opacity:.7">正在连接显示器…</div>
 <textarea id="sink" aria-label="keyboard sink"
   style="position:fixed;left:-1000px;top:0;width:10px;height:10px;opacity:0"></textarea>
 <script>
 (function () {{
   var BASE = '{base}';
-  var img = document.getElementById('screen');
+  var canvas = document.getElementById('screen');
+  var ctx = canvas.getContext('2d');
+  var offline = document.getElementById('offline');
+  // 画面自愈：**主动拉单帧画到 canvas**，而不是把 MJPEG 塞进 <img>。
+  // 原因：<img> 上的 MJPEG 一旦断开（例如 viewer 重启）不会重连，画面就永远黑着
+  // —— 用户实测到的"一片漆黑"有一部分就是这个。canvas 方案断了会自动续上。
+  (function pull() {{
+    var im = new Image();
+    im.onload = function () {{
+      offline.style.display = 'none';
+      if (canvas.width !== im.naturalWidth || canvas.height !== im.naturalHeight) {{
+        canvas.width = im.naturalWidth; canvas.height = im.naturalHeight;
+      }}
+      ctx.drawImage(im, 0, 0);
+      setTimeout(pull, 130);            // 约 7~8 帧/秒，看操作足够
+    }};
+    im.onerror = function () {{
+      offline.style.display = 'block';
+      setTimeout(pull, 1000);           // 失败就重试
+    }};
+    im.src = BASE + '/snapshot?t=' + Date.now();
+  }})();
+  var img = canvas;
   var sink = document.getElementById('sink');
   function norm(ev) {{
     var r = img.getBoundingClientRect();
@@ -462,6 +485,19 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:                # noqa: BLE001
                         return
                 time.sleep(0.4)
+            return
+        if rest == "/snapshot":
+            # 单帧 JPEG：页面用 canvas 主动拉帧（MJPEG 放进 <img> 一旦断开不会自愈，
+            # 实测表现为"viewer 重启后画面永远黑着"）。
+            sess.ensure()
+            for _ in range(20):
+                with sess.lock:
+                    frame = sess.latest
+                if frame:
+                    self._send(frame, "image/jpeg")
+                    return
+                time.sleep(0.25)
+            self.send_error(503, "no frame yet")
             return
         if rest == "/display":
             # 便于脚本查询"这个会话的显示号是多少"
