@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<!--
+  显示器自检卡（浏览器版）—— 与 dsh-display-testcard.py 同款画面的另一条渲染路径。
+
+  用途：Qt 卡验证的是 Qt/xcb 这条路；如果你要确认的是 **Chromium 在 X11 上的渲染**
+  （面板浏览器、网页类 GUI），就用这张。
+
+  用法：
+    python3 tools/dsh-display-testcard.py --browser            # 自动解析本会话显示并打开本页
+    或手工：
+    DISPLAY=:240 /opt/brave.com/brave-origin-beta/brave \
+      --user-data-dir=/tmp/dsh-testcard-profile --no-first-run --disable-dev-shm-usage \
+      --app="file:///home/xgl/python/DeepSeekHarness控制台/tools/dsh-display-testcard.html?session=本会话&display=:240"
+
+  看什么：8 条色条不串色 · 32 级灰阶台阶清晰 · 秒针在走（不是旧帧）· 顶部信息与实际相符。
+
+  ⚠️ 规范位置：https://github.com/xugulin/dsh-display-panel
+     （这里是开发副本，改动以插件仓库为准，改完再同步回来，别只改一边。）
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>显示器自检卡 / DISPLAY TESTCARD</title>
+<style>
+  html,body{margin:0;height:100%;background:#0d1117;color:#e6edf3;
+            font-family:"DejaVu Sans",system-ui,sans-serif;overflow:hidden}
+  .bars{display:flex;height:12vh}
+  .bars div{flex:1}
+  .gray{display:flex;height:5.5vh}
+  .gray div{flex:1}
+  .wrap{padding:3.5vh 3vw 2.5vh;box-sizing:border-box;height:calc(88vh - 6vh);
+        display:flex;flex-direction:column;justify-content:space-between}
+  h1{margin:0;font-size:4.6vh;letter-spacing:.4vw}
+  .grid{display:grid;grid-template-columns:auto 1fr;gap:1.1vh 2vw;font-size:2.3vh}
+  .grid i{font-style:normal;color:#8b949e}
+  .grid b{color:#7ee787;font-family:ui-monospace,monospace;font-weight:600}
+  .clock{font-size:8vh;font-family:ui-monospace,monospace;color:#58a6ff;font-weight:700}
+  .track{height:2.2vh;background:#161b22;border-radius:2px;overflow:hidden}
+  .fill{height:100%;width:0;background:#3fb950}
+  .foot{font-size:1.9vh;color:#8b949e}
+  .gridlines{position:fixed;inset:0;pointer-events:none;opacity:.15;
+    background:repeating-linear-gradient(0deg,#58a6ff 0 1px,transparent 1px 5vh),
+               repeating-linear-gradient(90deg,#58a6ff 0 1px,transparent 1px 5vw)}
+</style>
+</head>
+<body>
+<div class="gridlines"></div>
+<div class="bars">
+  <div style="background:#fff"></div><div style="background:#ff0"></div>
+  <div style="background:#0ff"></div><div style="background:#0f0"></div>
+  <div style="background:#f0f"></div><div style="background:#f00"></div>
+  <div style="background:#00f"></div><div style="background:#000"></div>
+</div>
+<div class="gray" id="gray"></div>
+<div class="wrap">
+  <h1>显示器自检卡 · DISPLAY TESTCARD</h1>
+  <div class="grid">
+    <i>会话 session</i><b id="sid">–</b>
+    <i>显示器 display</i><b id="disp">–</b>
+    <i>视口 / 屏幕</i><b id="vp">–</b>
+    <i>像素比 / 色深</i><b id="dpr">–</b>
+    <i>已运行 uptime</i><b id="up">–</b>
+  </div>
+  <div class="clock" id="clk">--:--:--</div>
+  <div class="track"><div class="fill" id="fill"></div></div>
+  <div class="foot">对照：色条不串色 · 32 级灰阶台阶清晰 · 秒针在走（画面是实时的）· 上面几行与实际相符</div>
+</div>
+<script>
+  // 32 级灰阶
+  var gray = document.getElementById('gray');
+  for (var i = 0; i < 32; i++) {
+    var d = document.createElement('div');
+    var v = Math.round(i * 255 / 31);
+    d.style.background = 'rgb(' + v + ',' + v + ',' + v + ')';
+    gray.appendChild(d);
+  }
+  var q = new URLSearchParams(location.search);
+  document.getElementById('sid').textContent = q.get('session') || '(未指定，加 ?session=…)';
+  document.getElementById('disp').textContent = q.get('display') || '(未指定)';
+  var t0 = Date.now();
+  function tick() {
+    var p = function (n) { return String(n).padStart(2, '0'); }, d = new Date();
+    document.getElementById('clk').textContent = p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+    document.getElementById('vp').textContent = innerWidth + '×' + innerHeight + ' / ' + screen.width + '×' + screen.height;
+    document.getElementById('dpr').textContent = devicePixelRatio + ' / ' + screen.colorDepth + ' bit';
+    document.getElementById('up').textContent = Math.round((Date.now() - t0) / 1000) + ' 秒';
+    document.getElementById('fill').style.width = ((Date.now() / 50) % 100) + '%';   // 每 5 秒扫一趟
+  }
+  tick(); setInterval(tick, 200);
+</script>
+</body>
+</html>
