@@ -424,7 +424,13 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _split(path: str) -> tuple[str | None, str]:
-        """把 /s/<sid>/<rest> 拆成 (sid, rest)；非会话路径返回 (None, path)。"""
+        """把 /s/<sid>/<rest> 拆成 (sid, rest)；非会话路径返回 (None, path)。
+
+        ⚠️ **必须先剥掉查询串**：页面为了防缓存会带 ``?t=<时间戳>`` / ``?v=…``，
+        早先拿整条 path（含 ?…）去比对 → 所有带参数的请求统统 404，
+        表现为"页面一直在连接显示器…"（实测：连新开的浏览器里也是黑的）。
+        """
+        path = path.split("?", 1)[0]
         parts = [p for p in path.split("/") if p]
         if len(parts) >= 2 and parts[0] == "s":
             return parts[1], "/" + "/".join(parts[2:])
