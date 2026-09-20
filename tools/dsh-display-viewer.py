@@ -177,6 +177,27 @@ def run_tool(sess: Session, argv: list[str]) -> None:
         print(f"[{sess.sid}] {argv[0]} 异常：{type(exc).__name__}: {exc}", flush=True)
 
 
+#: DOM 的标准键名 → xdotool（X keysym）名。两套名字并不一样，
+#: 例如 DOM 叫 Backspace / Enter / ArrowUp，而 X11 叫 BackSpace / Return / Up。
+_XDOTOOL_KEY = {
+    "Enter": "Return", "Backspace": "BackSpace", "Delete": "Delete",
+    "Tab": "Tab", "Escape": "Escape", " ": "space",
+    "ArrowUp": "Up", "ArrowDown": "Down", "ArrowLeft": "Left", "ArrowRight": "Right",
+    "Home": "Home", "End": "End", "PageUp": "Prior", "PageDown": "Next",
+}
+
+
+def _xdotool_key(key: str) -> str:
+    """把页面报上来的键（可能带 ctrl+/super+ 前缀）翻成 xdotool 认的名字。"""
+    mods = ""
+    base = key
+    for prefix in ("ctrl+", "super+", "alt+", "shift+"):
+        while base.startswith(prefix):
+            mods += prefix
+            base = base[len(prefix):]
+    return mods + _XDOTOOL_KEY.get(base, base)
+
+
 def inject(sess: Session, obj: dict) -> None:
     """把一个输入事件注入到该会话自己的显示。"""
     if not sess.ensure():
@@ -208,7 +229,7 @@ def inject(sess: Session, obj: dict) -> None:
     elif kind == "key":
         key = str(obj.get("k") or "")
         if key:
-            run_tool(sess, ["xdotool", "key", key])
+            run_tool(sess, ["xdotool", "key", _xdotool_key(key)])
 
 
 def _inject_wayland(sess: Session, obj: dict) -> None:
@@ -305,10 +326,21 @@ PAGE = """<!doctype html><meta charset=utf-8><title>DSH 显示器 · {sid}</titl
   img.addEventListener('wheel', function (ev) {{
     ev.preventDefault(); send({{ t: 'wheel', dy: ev.deltaY }});
   }}, {{ passive: false }});
-  // 键盘：普通字符走 input（含输入法合成结果），控制键走 keydown
-  var SPECIAL = ['Return','BackSpace','Tab','Escape','Up','Down','Left','Right','Home','End'];
+  // 键盘：普通字符走 input（含输入法合成结果），控制键与组合键走 keydown。
+  //
+  // ⚠️ 键名必须用 **DOM 的标准名**：退格是 'Backspace'（小写 s）、回车是 'Enter'。
+  // 早先写成 'BackSpace' / 'Return'（X11 的 keysym 名）→ indexOf 永远不命中，
+  // 于是退格和回车完全没反应（用户实测："打错了删不掉"）。X11 名字的换算放在宿主侧。
+  var NAMED = {{ Enter: 1, Backspace: 1, Delete: 1, Tab: 1, Escape: 1,
+                ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1,
+                Home: 1, End: 1, PageUp: 1, PageDown: 1 }};
   sink.addEventListener('keydown', function (ev) {{
-    if (SPECIAL.indexOf(ev.key) >= 0) {{ ev.preventDefault(); send({{ t: 'key', k: ev.key }}); }}
+    var mod = ev.ctrlKey ? 'ctrl+' : (ev.metaKey ? 'super+' : '');
+    // 组合键（Ctrl+C/V/A…）也走 key 通道；单个可打印字符仍交给 input，避免重复输入
+    if (NAMED[ev.key] || (mod && ev.key.length === 1)) {{
+      ev.preventDefault();
+      send({{ t: 'key', k: mod + ev.key }});
+    }}
   }});
   sink.addEventListener('input', function () {{
     if (sink.value) {{ send({{ t: 'text', s: sink.value }}); sink.value = ''; }}
