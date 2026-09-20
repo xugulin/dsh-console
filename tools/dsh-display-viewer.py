@@ -297,17 +297,20 @@ def _type_text(sess: Session, text: str) -> None:
     if all(ord(ch) < 128 for ch in text):
         run_tool(sess, ["xdotool", "type", "--clearmodifiers", "--delay", "25", text])
         return
+    # ⚠️ xclip 必须给 ``-l``（服务若干次选区请求后再退出）：Qt 读剪贴板是**分几次请求**的
+    # （先问 TARGETS、再取数据），默认只服务一次就退出 → 数据还没取到就没主了，
+    # 表现为"Ctrl+V 什么都没粘上"（这就是我上一版失败的原因）。
+    # 又因为它会驻留，不能用 subprocess.run 等它 —— 用 Popen 喂完 stdin 就走。
     try:
-        proc = subprocess.run(["xclip", "-selection", "clipboard"], env=sess.env,
-                              input=text.encode("utf-8"), capture_output=True, timeout=10)
-        if proc.returncode != 0:
-            print(f"[{sess.sid}] xclip 失败：{proc.stderr.decode('utf-8', 'replace')[:120]}",
-                  flush=True)
-            return
+        proc = subprocess.Popen(["xclip", "-selection", "clipboard", "-l", "20"],
+                                env=sess.env, stdin=subprocess.PIPE,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc.stdin.write(text.encode("utf-8"))
+        proc.stdin.close()
     except Exception as exc:                         # noqa: BLE001
         print(f"[{sess.sid}] xclip 异常：{type(exc).__name__}: {exc}", flush=True)
         return
-    time.sleep(0.15)
+    time.sleep(0.4)                                  # 等选区真正建立
     run_tool(sess, ["xdotool", "key", "--clearmodifiers", "ctrl+v"])
 
 
