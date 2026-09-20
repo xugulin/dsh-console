@@ -326,6 +326,19 @@ PAGE = """<!doctype html><meta charset=utf-8><title>DSH 显示器 · {sid}</titl
   img.addEventListener('wheel', function (ev) {{
     ev.preventDefault(); send({{ t: 'wheel', dy: ev.deltaY }});
   }}, {{ passive: false }});
+  // 输入法（中文）合成：**合成期间绝不能发送**。
+  //
+  // 踩过的坑：打拼音时隐藏输入框会不断触发 input 事件，值是**未上屏的拼音**
+  // （如 "xianshiqi"）→ 早先直接发出去，等上屏后又发一次中文 → 远端同时收到
+  // 拼音和中文（用户实测："我只想输入中文的显示器，结果字母也输进去了"）。
+  // 正确做法：compositionstart 到 compositionend 之间一律不发，上屏时只发最终文本。
+  var composing = false;
+  sink.addEventListener('compositionstart', function () {{ composing = true; }});
+  sink.addEventListener('compositionend', function () {{
+    composing = false;
+    if (sink.value) {{ send({{ t: 'text', s: sink.value }}); sink.value = ''; }}
+  }});
+
   // 键盘：普通字符走 input（含输入法合成结果），控制键与组合键走 keydown。
   //
   // ⚠️ 键名必须用 **DOM 的标准名**：退格是 'Backspace'（小写 s）、回车是 'Enter'。
@@ -335,6 +348,8 @@ PAGE = """<!doctype html><meta charset=utf-8><title>DSH 显示器 · {sid}</titl
                 ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1,
                 Home: 1, End: 1, PageUp: 1, PageDown: 1 }};
   sink.addEventListener('keydown', function (ev) {{
+    // 合成中的按键交给输入法处理（例如回车用于选词），不要转发
+    if (ev.isComposing || composing) {{ return; }}
     var mod = ev.ctrlKey ? 'ctrl+' : (ev.metaKey ? 'super+' : '');
     // 组合键（Ctrl+C/V/A…）也走 key 通道；单个可打印字符仍交给 input，避免重复输入
     if (NAMED[ev.key] || (mod && ev.key.length === 1)) {{
@@ -342,7 +357,9 @@ PAGE = """<!doctype html><meta charset=utf-8><title>DSH 显示器 · {sid}</titl
       send({{ t: 'key', k: mod + ev.key }});
     }}
   }});
-  sink.addEventListener('input', function () {{
+  sink.addEventListener('input', function (ev) {{
+    // 合成中（含 isComposing 标记）一律不发，避免把拼音当正文送出去
+    if (composing || (ev && ev.isComposing)) {{ return; }}
     if (sink.value) {{ send({{ t: 'text', s: sink.value }}); sink.value = ''; }}
   }});
 }})();
