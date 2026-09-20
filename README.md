@@ -14,6 +14,7 @@
 ![Portable](https://img.shields.io/badge/portable-unzip%20%26%20run-brightgreen)
 ![Themes](https://img.shields.io/badge/themes-7-9b59b6)
 ![Chromium](https://img.shields.io/badge/built--in%20browser-Chromium%20%C2%B7%20QtWebEngine-4285F4)
+[![macOS smoke](https://github.com/xugulin/dsh-console/actions/workflows/macos.yml/badge.svg)](https://github.com/xugulin/dsh-console/actions/workflows/macos.yml)
 
 </div>
 
@@ -34,6 +35,17 @@
 ---
 
 ## 🇨🇳 简体中文
+
+### 平台与验证 · Platforms & verification
+
+| 平台 | 状态 | 怎么验证的 |
+|---|---|---|
+| **Linux** | ✅ 完整支持（便携包） | 作者实机 + `./run.sh --self-test` |
+| **Windows 10/11** | ✅ 完整支持（便携包） | 用户实机反馈 + 打包时校验启动脚本（CRLF/GBK/BOM/param 位置） |
+| **macOS** | ✅ 可跑（从源码；暂未提供便携包） | GitHub Actions 免费 macOS runner：[`macos.yml`](.github/workflows/macos.yml) —— 装 PySide6 6.11.2、离屏真起 Qt、**7 套主题全部渲染**、市场源设置对话框布局回归（压到 560×420 时控件不被压扁）、截图作为 artifact 上传。实测 **7/7 通过** |
+
+> 这个工作流**特意只选不需要 harness、不需要网络**的检查（CI 上没有 DSH 服务与 API key），
+> 并**上传截图**：出问题时能直接看图，而不是只看一行报错。
 
 ### 这是什么
 
