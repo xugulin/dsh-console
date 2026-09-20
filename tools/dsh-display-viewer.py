@@ -96,9 +96,23 @@ class Session:
             return ok
 
     def _alive(self) -> bool:
+        """显示是否真的可用。
+
+        ⚠️ X11 下**不能只看 socket 文件是否存在**：进程被杀后 socket 文件会残留，
+        于是"文件在、服务没了"，后续抓帧/注入全部失败（实测踩过：一堆遗留 Xvfb
+        造成了难以理解的怪现象）。这里实际连一次确认。
+        """
         if BACKEND == "wayland":
             return os.path.exists(os.path.join(self.runtime, "wayland-1"))
-        return os.path.exists(f"/tmp/.X11-unix/X{self.number}")
+        if not os.path.exists(f"/tmp/.X11-unix/X{self.number}"):
+            return False
+        try:
+            proc = subprocess.run(["xdotool", "getdisplaygeometry"],
+                                  env={**os.environ, "DISPLAY": self.display, "WAYLAND_DISPLAY": ""},
+                                  capture_output=True, timeout=6)
+            return proc.returncode == 0 and bool(proc.stdout.strip())
+        except Exception:                            # noqa: BLE001
+            return False
 
     def _start_xvfb(self) -> bool:
         if self._alive():
