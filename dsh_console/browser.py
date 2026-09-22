@@ -732,8 +732,11 @@ def build_window(url: str | None, note: str = "", *, autostart: bool = False):
                     try:
                         ctx = self._menu_context()
                         self._ctx = ctx
-                        pos = event.position().toPoint()
-                        self._show_html_menu(pos.x(), pos.y(), ctx)
+                        # ⚠️ contextMenuEvent 给的是 **QContextMenuEvent**，它没有
+                        # position()（那是 QMouseEvent 的 API）—— 用 pos()。
+                        # 实测日志里刷了一屏 "…object has no attribute 'position'"。
+                        point = event.pos() if hasattr(event, "pos") else event.position().toPoint()
+                        self._show_html_menu(point.x(), point.y(), ctx)
                     except Exception as exc:             # noqa: BLE001
                         print(f"[html-menu] 失败：{type(exc).__name__}: {exc}",
                               file=sys.stderr, flush=True)

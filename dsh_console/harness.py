@@ -377,6 +377,40 @@ def info(source: str | None = None) -> HarnessInfo:
     return st
 
 
+def package_manager_owner(path: Path | None) -> str:
+    """这份 dsh 是不是由**系统包管理器**装的（pacman / dpkg / rpm）？返回包名，否则空串。
+
+    为什么必须识别：包管理器装的那份，**用 npm 升级是白费** —— npm 写进去的文件
+    会被包管理器在下一次 `-Syu` 时覆盖回去（或者当场文件冲突报错）。用户看到的就是
+    "选了版本、点了升级、版本号没变"，很容易以为是控制台坏了。
+
+    实测本机（真实反馈）：``/usr/bin/dsh`` 与 ``/usr/lib/node_modules/@deepseek-ai/dsh``
+    都由 ``deepseek-harness-bin`` 拥有，而控制台当时只会闷头跑 ``sudo npm install -g``。
+    """
+    if path is None:
+        return ""
+    import shutil as _shutil
+
+    probe = str(path)
+    if _shutil.which("pacman"):
+        try:
+            out = _run(["pacman", "-Qo", probe], timeout=20).stdout
+            for line in out.splitlines():                       # "… 由 xxx 1.2.3-1 所拥有"
+                for marker in ("由 ", " is owned by "):
+                    if marker in line:
+                        return line.split(marker, 1)[1].replace("所拥有", "").strip()
+        except HarnessError:
+            pass
+    if _shutil.which("dpkg"):
+        try:
+            out = _run(["dpkg", "-S", probe], timeout=20).stdout.strip()
+            if out and ":" in out:
+                return out.split(":", 1)[0].strip()
+        except HarnessError:
+            pass
+    return ""
+
+
 def _can_write(path: Path) -> bool:
     import os
 
@@ -647,6 +681,23 @@ def update(target: str = "latest", *, source: str | None = None, timeout: int = 
     # 实测踩过：把 error 当致命，结果整个"安装"功能被我自己堵死。
     before = info(source)
     installed = before.installed
+
+    # ⚠️ **先拦"包管理器装的那份"**：对它跑 npm 是白费力气（见 package_manager_owner）。
+    #    放在权限检查之前 —— 否则用户会看到"没有升级权限/已升级"这类**误导性**的话。
+    if source != SOURCE_BUNDLED:
+        root = package_root(source)
+        owner = package_manager_owner(root if root else None)
+        if owner:
+            hint = (f"sudo pacman -Syu {owner.split()[0]}" if "pacman" in (shutil.which("pacman") or "")
+                    else f"用你的包管理器升级 {owner.split()[0]}")
+            raise HarnessError(
+                f"这份 harness 由系统包管理器管理（{owner}），**不能用 npm 升级**：\n"
+                f"npm 装进去的新版本会被包管理器覆盖回去（或直接文件冲突），"
+                f"看起来就是「升级了但版本没变」。\n"
+                f"请改用：{hint}\n"
+                f"或者：把来源切到「内置 harness」（跟着便携包走，不需要系统权限），"
+                f"或用 npm 另行安装一份到用户目录。"
+            )
 
     # 权限只对**系统那份**有意义：内置那份装在包里，不需要也不该要 sudo。
     # 判断依据是"包在不在"，而不是 info() 的 writable——包还没装时后者一定是 False。
