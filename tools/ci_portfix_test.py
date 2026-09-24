@@ -21,6 +21,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+#: 让日志在 CI 上**按顺序**出现（不带 -u 的话 stdout 被块缓冲，失败时只能看到半截）。
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:                                        # noqa: BLE001
+    pass
+
 from dsh_console import service  # noqa: E402
 
 PASS: list[str] = []
@@ -30,6 +36,16 @@ FAIL: list[str] = []
 def check(name: str, ok: bool, detail: str = "") -> None:
     (PASS if ok else FAIL).append(name)
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}{('  —— ' + detail) if detail else ''}")
+
+
+def _proc_has_cmdline() -> bool:
+    """``/proc`` 在不在（macOS 没有）。
+
+    这直接决定两件事：``port_holder`` 走 ``/proc`` 还是 ``lsof``；以及占用者的
+    **命令行**读不读得到——读不到时进程名退化成 lsof 的 COMMAND 列，
+    断言不能要求命令行里出现 "python"。
+    """
+    return Path("/proc/self/cmdline").exists()
 
 
 def free_port(start: int = 39100) -> int:
@@ -83,8 +99,14 @@ def main() -> int:
         holder = service.port_holder(port)
         check("能反查到占用者 pid", holder is not None and holder.pid == proc.pid,
               f"holder={holder}")
-        check("占用者命令行可读", bool(holder and "python" in (holder.cmdline or "").lower()),
-              (holder.cmdline if holder else "")[:70])
+        # 进程名：Linux 上来自 /proc/<pid>/cmdline（是解释器全路径，含 python）；
+        # macOS 上 /proc 不存在，退化成 lsof 的 COMMAND 列（就是 "Python"）。
+        if _proc_has_cmdline():
+            check("占用者命令行可读", bool(holder and "python" in (holder.cmdline or "").lower()),
+                  (holder.cmdline if holder else "")[:70])
+        else:
+            check("占用者进程名可读（无 /proc，靠 lsof 的 COMMAND 列）",
+                  bool(holder and holder.name), holder.name if holder else "")
 
         print("== 3. 强制清端口（TERM 路径）==")
         rep = service.force_free_port(port, restart=False)
@@ -171,4 +193,16 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # 崩了也要留下**完整的**上下文：CI 上拿不到交互式终端，堆栈就是唯一线索。
+    try:
+        code = main()
+    except BaseException:                                # noqa: BLE001
+        import traceback
+
+        print("\n！！测试自身抛异常（不是断言的失败，而是代码路径炸了）")
+        print(f"平台 {sys.platform}　/proc 可用: {_proc_has_cmdline()}")
+        traceback.print_exc()
+        code = 2
+    finally:
+        print(f"\n已通过 {len(PASS)} 项；失败 {len(FAIL)} 项")
+    sys.exit(code)
