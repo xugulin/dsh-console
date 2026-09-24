@@ -85,6 +85,30 @@ def spawn_decoy(port: int, *, stubborn: bool = False) -> subprocess.Popen:
     return proc
 
 
+def proc_state(pid: int) -> str:
+    """给诊断用：这个 pid 现在到底怎么样（ps 怎么说、signal 0 通不通）。
+
+    macOS 上踩过一次"TERM + KILL 都发了却判定还在"的坑，光看 `pid_alive` 说不清
+    到底是进程真没死、还是探活本身在骗人，所以把两个来源都打出来。
+    """
+    try:
+        out = subprocess.run(["ps", "-o", "stat=,command=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=10)
+        text = (out.stdout or "").strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        text = f"<ps 失败: {exc}>"
+    try:
+        os.kill(pid, 0)
+        sig = "signal 0 可达"
+    except ProcessLookupError:
+        sig = "signal 0: 进程不存在"
+    except PermissionError:
+        sig = "signal 0: 权限不足"
+    except OSError as exc:
+        sig = f"signal 0 出错: {exc}"
+    return f"ps={text or '<空>'} / {sig} / pid_alive={service.pid_alive(pid)}"
+
+
 def main() -> int:
     print(f"平台: {sys.platform}　（/proc 路线仅 Linux；macOS 靠 lsof 兜底）")
     print("== 1. 端口探测 ==")
@@ -109,10 +133,18 @@ def main() -> int:
                   bool(holder and holder.name), holder.name if holder else "")
 
         print("== 3. 强制清端口（TERM 路径）==")
-        rep = service.force_free_port(port, restart=False)
+        print(f"  清理前: {proc_state(proc.pid)}")
+        try:
+            rep = service.force_free_port(port, restart=False)
+        except Exception as exc:                             # noqa: BLE001
+            print(f"  清理抛异常: {type(exc).__name__}: {exc}")
+            print(f"  异常后: {proc_state(proc.pid)}")
+            print(f"  端口还用着吗: {not service.port_is_free(port)}"
+                  f"　现在的主人: {service.port_holder(port)}")
+            raise
         check("报告里记录了占用者", rep.holder is not None and rep.holder.pid == proc.pid)
         check("端口实测已空出", rep.free, rep.summary())
-        check("进程确实退出了", not service.pid_alive(proc.pid))
+        check("进程确实退出了", not service.pid_alive(proc.pid), proc_state(proc.pid))
         check("留下了操作记录", len(rep.actions) >= 2, " / ".join(rep.actions))
         check("识别为祖先判定为假", not service.is_ancestor(proc.pid))
     finally:
@@ -159,7 +191,42 @@ def main() -> int:
     if len(chain) > 1:
         check("真正的父进程被认作祖先", service.is_ancestor(chain[1]), f"ppid={chain[1]}")
 
-    print("== 8. lsof 兜底解析（macOS 走这条；本机没装 lsof 也要能验）==")
+    print("== 9. macOS 的 ps 兜底：僵尸判定（本机没 /proc 也要能验）==")
+    # macOS 没有 /proc，僵尸只能靠 `ps -o stat=` 认；Linux CI 上走的是 /proc 那条，
+    # 所以这里用假输出把 ps 那条路也钉住（CI 的 macOS 跑的就是它）。
+    class _PsOut:
+        def __init__(self, out: str) -> None:
+            self.stdout, self.returncode = out, 0
+
+    original_ps = service.subproc.run
+    try:
+        service.subproc.run = lambda *a, **k: _PsOut("Z+   [Python] <defunct>\n")  # type: ignore[assignment]
+        check("ps 报 Z 时判为僵尸", service._zombie_via_ps(os.getpid()), "假输出 Z+")
+        service.subproc.run = lambda *a, **k: _PsOut("S+   /usr/bin/python\n")     # type: ignore[assignment]
+        check("ps 报 S 时不判为僵尸", not service._zombie_via_ps(os.getpid()), "假输出 S+")
+        service.subproc.run = lambda *a, **k: _PsOut("")                           # type: ignore[assignment]
+        check("ps 无输出时不判为僵尸", not service._zombie_via_ps(os.getpid()))
+    finally:
+        service.subproc.run = original_ps                      # type: ignore[assignment]
+    check("ps 状态字段解析（带转义空格的 comm）",
+          service._unescaped_space(r"Z+   /Applications/My\ App") == 2,
+          "_unescaped_space")
+
+    print("== 10. 真的子进程：僵尸要被认出来并且回收掉 ==")
+    zombie = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        os.kill(zombie.pid, signal.SIGKILL)
+        time.sleep(0.6)
+        check("未回收的僵尸被判为已结束", not service.pid_alive(zombie.pid),
+              proc_state(zombie.pid))
+        check("僵尸顺手被回收（poll 拿到退出码）", zombie.poll() is not None,
+              f"returncode={zombie.returncode}")
+    finally:
+        if zombie.poll() is None:
+            zombie.kill()
+            zombie.wait(timeout=10)
+
+    print("== 11. lsof 兜底解析（macOS 走这条；本机没装 lsof 也要能验）==")
     fake = (
         "COMMAND   PID   USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME\n"
         "node     4242    xgl   23u  IPv4 0x1234567890abcdef      0t0  TCP 127.0.0.1:3080 (LISTEN)\n"
@@ -184,7 +251,6 @@ def main() -> int:
         service.subproc.run = original                          # type: ignore[assignment]
 
     print()
-    print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
     if FAIL:
         for name in FAIL:
             print(f"  失败：{name}")

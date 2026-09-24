@@ -954,6 +954,50 @@ def use_child_backend(source: str | None = None) -> bool:
     return (source or _harness.current_source()) == _harness.SOURCE_BUNDLED
 
 
+def _unescaped_space(text: str) -> int:
+    """找到第一个没被反斜杠转义的空格（``ps`` 会转义文件名里的空格）。"""
+    i = 0
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == " ":
+            return i
+        i += 1
+    return -1
+
+
+def _ps_state(pid: int) -> str:
+    """用 ``ps`` 读进程状态字段（``Z`` = 僵尸）。
+
+    只在没有 ``/proc`` 的系统上走这条路（macOS），所以优先用 POSIX 可移植的
+    ``-o stat=``；万一某个 ps 不认（BSD 上更常见的 ``state`` 关键字），再退回
+    ``-o state=``。``comm`` 字段可能带空格，取第一段之前先按转义规则切开。
+    """
+    for key in ("stat=", "state="):
+        try:
+            out = subproc.run(["ps", "-o", key, "-p", str(pid)],
+                              capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        text = (out.stdout or "").strip()
+        if not text:
+            continue
+        cut = _unescaped_space(text)
+        return (text[:cut] if cut > 0 else text).strip()
+    return ""
+
+
+def _zombie_via_ps(pid: int) -> bool:
+    """僵尸判定的 ``ps`` 兜底（没有 ``/proc`` 的系统走这条，也就是 macOS）。
+
+    单独抽成一个函数是为了**能被测试直接钉住**：Linux 上 ``/proc`` 总是先给出答案，
+    藏在 :func:`_is_zombie` 里的这条路本地永远跑不到，只能靠 CI 的 macOS 才发现
+    （而它已经真的漏过一次：探活一直说"还在"，白等 8 秒报假失败）。
+    """
+    return _ps_state(pid).startswith("Z")
+
+
 def _is_zombie(pid: int) -> bool:
     """是不是已经结束、只是还没被父进程回收（``<defunct>``）。
 
@@ -961,14 +1005,31 @@ def _is_zombie(pid: int) -> bool:
     什么也不会发生），而 ``os.kill(pid, 0)`` 依然报告"进程存在" —— 只看后者会把
     "已经杀掉的进程"误判成"杀不掉"，于是自动修复白等 8 秒再报一个假的失败。
     僵尸不占端口、不占内存，除了 pid 什么都没剩下。
+
+    三条路，因为两个平台的答案不在同一个地方：
+
+    * **自己的子进程**（测试里那个假 harness 就是）：``waitpid(WNOHANG)`` 一锤定音，
+      而且顺手把僵尸**回收掉**——不回收的话它会一直挂在进程表里，后面的探活继续被骗；
+    * Linux：读 ``/proc/<pid>/stat`` 的状态字段；
+    * macOS（没有 ``/proc``）：退到 ``ps -o stat=``，见 :func:`_zombie_via_ps`。
     """
     if pid <= 0:
+        return False
+    try:
+        reaped, _status = os.waitpid(pid, os.WNOHANG)
+        return reaped == pid          # 能 wait 到自己的、还没被回收的子进程 = 已经是僵尸
+    except ChildProcessError:
+        pass                          # 不是我的子进程，走下面的路
+    except OSError:
+        pass
+    if os.name == "nt":
         return False
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
         return stat[stat.rindex(")") + 2:].split()[0] == "Z"
     except (OSError, ValueError, IndexError):
-        return False
+        pass                          # 没有 /proc（macOS）
+    return _zombie_via_ps(pid)
 
 
 def pid_alive(pid: int) -> bool:
