@@ -53,6 +53,16 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python tools/ci_gui_smoke.py "$RUNNER_TEMP/shots"
 
+      - name: 「强制修复端口占用」功能测试（真起进程、真杀）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          if ! command -v lsof >/dev/null 2>&1; then
+            echo "没有 lsof，跳过（macOS 自带 lsof，不该走到这里）"
+            exit 0
+          fi
+          python tools/ci_portfix_test.py
+
       - name: 上传截图（无论成败都传，失败了才有图看）
         if: always()
         uses: actions/upload-artifact@v4

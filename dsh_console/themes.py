@@ -392,6 +392,25 @@ QPushButton#Danger:hover {{ border-color: {t.danger}; background: {t.surface_alt
 /* #Danger 是 ID 选择器，优先级高于 `QPushButton:disabled`（CSS 里 ID > 类型+伪类），
    不单独写禁用态的话「停止」按钮在不可用时仍是鲜红色，看着像能点。 */
 QPushButton#Danger:disabled {{ color: {t.text_faint}; border-color: {t.border}; background: {t.surface}; }}
+
+/* 「强制修复端口占用」：救援按钮，要够显眼才找得到（用户原话："必须要够猛"）。
+   实心 warn 色（不是描边）：同排的按钮清的清一色是描边样式，实心块才一眼能认出来。
+   颜色也不用 #Danger 的纯红——那和旁边的「停止」撞脸，而且它动手的是**别人的**进程，
+   语义是"抢救"而不是"关停"。hover/按下加亮，按下去有分量。 */
+QPushButton#ForceFix {{
+    background: {t.warn};
+    color: {t.accent_text};
+    border: 1px solid {t.warn};
+    font-weight: 700;
+    padding: 7px 18px;
+}}
+QPushButton#ForceFix:hover {{
+    background: {t.danger};
+    border-color: {t.danger};
+    color: #ffffff;
+}}
+QPushButton#ForceFix:pressed {{ background: {t.danger}; border-color: {t.danger}; color: #ffffff; }}
+QPushButton#ForceFix:disabled {{ color: {t.text_faint}; border-color: {t.border}; background: {t.surface}; }}
 QPushButton#Ghost {{ background: transparent; }}
 
 /* 分段切换（插件 / 技能 二合一页） */

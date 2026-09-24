@@ -165,6 +165,58 @@ def main() -> int:
         check("市场源设置对话框冒烟", False, f"{type(exc).__name__}: {exc}")
         traceback.print_exc()
 
+    # ---- 控制台页：构造 +「强制修复端口占用」按钮（救援按钮，不能在重构里丢）
+    try:
+        from dsh_console import i18n, themes
+        from dsh_console.ui.page_dashboard import DashboardPage
+
+        page_theme = theme_of(keys[0])
+        # ⚠️ QSS 是**应用级**的（真实程序里由 MainWindow.apply_theme 设到 QApplication 上）。
+        # 不设它，孤立构造出来的页面全是没有样式的原生控件——截图会骗人：
+        # 按钮看着是灰的，让人误以为样式没生效（实测踩过）。
+        app.setStyleSheet(themes.build_qss(page_theme))
+        page = DashboardPage(page_theme)
+        page.resize(1000, 760)
+        page.show()
+        for _ in range(10):
+            app.processEvents()
+        btn = getattr(page, "btn_forcefix", None)
+        check("控制台页有「强制修复端口占用」按钮", btn is not None, type(btn).__name__)
+        if btn is not None:
+            check("按钮文案正确", btn.text() == "强制修复端口占用", btn.text())
+            check("按钮用了醒目的 ForceFix 样式", btn.objectName() == "ForceFix", btn.objectName())
+            check("按钮默认可用（救援按钮不该被灰掉）", btn.isEnabled())
+            check("按钮有说明性 tooltip", len(btn.toolTip()) > 20, btn.toolTip()[:40])
+            # 样式**真的**生效了吗：按钮底色应该是主题的 warn 色（"够猛"就靠这个撞色）
+            shot = page.grab().toImage()
+            center = btn.mapTo(page, btn.rect().center())
+            pix = shot.pixelColor(center.x(), center.y())
+            want = page_theme.warn.lstrip("#")
+            wr, wg, wb = (int(want[i:i + 2], 16) for i in (0, 2, 4))
+            got = (pix.red(), pix.green(), pix.blue())
+            # 中心可能有文字（文字是深色），所以判"是不是偏暖的实心块"而不是精确比对
+            check("按钮底色是主题 warn 色（实心，够醒目）",
+                  pix.red() > 120 and pix.red() > pix.blue() + 60,
+                  f"实测 rgb{got}，主题 warn rgb=({wr},{wg},{wb})")
+        path = out / "page-dashboard.png"
+        page.grab().save(str(path))
+        ok, detail = png_has_content(path)
+        check("控制台页能渲染出内容", ok, detail)
+        # 英文界面下这句文案要能翻译过去（i18n 表的键必须与代码一字不差）
+        try:
+            i18n.set_current(i18n.LANG_EN)
+            en = i18n.replace_all("强制修复端口占用")
+            check("按钮文案有英文翻译", en != "强制修复端口占用", en)
+        except Exception as exc:                         # noqa: BLE001
+            check("按钮文案有英文翻译", False, f"{type(exc).__name__}: {exc}")
+        finally:
+            i18n.set_current(i18n.LANG_ZH)
+        page.hide()
+        page.deactivate()
+    except Exception as exc:                             # noqa: BLE001
+        check("控制台页冒烟", False, f"{type(exc).__name__}: {exc}")
+        traceback.print_exc()
+
     passed = sum(1 for _n, ok, _d in RESULTS if ok)
     print(f"\n== {passed}/{len(RESULTS)} 项通过 ==")
     for name, ok, detail in RESULTS:

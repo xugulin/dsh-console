@@ -39,6 +39,61 @@ class ServiceError(RuntimeError):
 
 
 @dataclass(slots=True)
+class PortHolder:
+    """占着某个端口的进程。"""
+
+    pid: int
+    port: int
+    name: str = ""
+    cmdline: str = ""
+    rss: int = 0
+    uptime: int = 0
+
+    @property
+    def summary(self) -> str:
+        return f"PID {self.pid}（{self.name or '未知进程'}）"
+
+
+@dataclass(slots=True)
+class PortFixReport:
+    """一次「强制修复端口占用」的结果。
+
+    这是给界面直接显示的：每一步做了什么、最后端口到底空没空、服务有没有起来。
+    只报"已修复"而不报实测结果，等于让用户自己再去猜一遍。
+    """
+
+    port: int = 0
+    #: 这次**要抢**的端口。和 :attr:`port`（收拾完之后 harness 实际在听的端口）分开记：
+    #: 抢完端口后状态刷新会把 ``port`` 覆盖成现状，摘要里再拿它说事就会写出
+    #: "端口 3080 已空出"而实际抢的是 39100。
+    target_port: int = 0
+    holder: PortHolder | None = None
+    actions: list[str] = field(default_factory=list)
+    free: bool = False
+    restarted: bool = False
+    deferred: bool = False
+    url: str | None = None
+    pid: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return self.free or self.pid > 0 or self.deferred
+
+    def summary(self) -> str:
+        want = self.target_port or self.port
+        if self.deferred:
+            return "已交给 systemd 延迟清理，几秒后自动重启"
+        if self.free and self.pid:
+            tail = (f"，harness 正在运行（PID {self.pid}，端口 {self.port}）"
+                    if self.port and self.port != want else
+                    f"，harness 正在运行（PID {self.pid}）")
+            return f"已修复：端口 {want} 已空出{tail}"
+        if self.free:
+            return f"端口 {want} 已空出，但 harness 没起来"
+        return f"端口 {want} 仍被占用"
+
+
+@dataclass(slots=True)
 class ServiceStatus:
     """一次状态快照。
 
@@ -403,6 +458,390 @@ def _port_of_pid(pid: int) -> int | None:
     return None
 
 
+def port_is_free(port: int, host: str = "127.0.0.1") -> bool:
+    """端口现在能不能被 bind。
+
+    ``SO_REUSEADDR`` 只为了放过 TIME_WAIT，**不会**让已 LISTEN 的端口变得可用——
+    所以这个探测问的就是"harness 现在能不能占上这个端口"。
+    """
+    import socket
+
+    if port <= 0:
+        return False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+    except OSError:
+        return False
+    finally:
+        sock.close()
+    return True
+
+
+def _holder_via_lsof(port: int) -> "PortHolder | None":
+    """用 ``lsof`` 找端口的主人（``/proc`` 不管用时的兜底）。
+
+    macOS 没有 ``/proc``（Linux 上要 root 才看得到别人的 fd），所以那个"inode 对暗号"
+    的办法在那边**完全失效**——而 CI 恰恰跑在 macOS 上。lsof 两个平台都有，
+    macOS 上它对**任何**进程都能看到 pid，正好补上这个缺口。
+    """
+    try:
+        proc = _run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"], timeout=10)
+    except ServiceError:
+        return None
+    for line in proc.stdout.splitlines()[1:]:            # 第一行是表头
+        parts = line.split()
+        if len(parts) < 3 or not parts[1].isdigit():
+            continue
+        pid = int(parts[1])
+        return PortHolder(pid=pid, port=port,
+                          name=_proc_comm(pid) or parts[0],
+                          cmdline=_proc_cmdline(pid) or parts[0],
+                          rss=_proc_rss_bytes(pid),
+                          uptime=_proc_uptime_seconds(pid))
+    return None
+
+
+def port_holder(port: int) -> "PortHolder | None":
+    """谁占着这个端口。
+
+    先查 ``/proc``：拿 ``/proc/net/tcp`` 里的 inode 去 ``/proc/<pid>/fd`` 反查。
+    这条路不用特权就能查到自己的进程，而"自己的 harness 被自己启动的另一个实例
+    挤掉"正是最常见的场景。
+    查不到（macOS 没有 /proc、或占用者属于别的用户）再退到 ``lsof``。
+    """
+    holder = _holder_via_proc(port)
+    if holder is not None:
+        return holder
+    return _holder_via_lsof(port)
+
+
+def _holder_via_proc(port: int) -> "PortHolder | None":
+    """``/proc`` 路线的实现（Linux）。"""
+    inodes = _listen_inodes(port)
+    if not inodes:
+        return None
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            for fd in (entry / "fd").iterdir():
+                try:
+                    target = os.readlink(fd)
+                except OSError:
+                    continue
+                if not target.startswith("socket:["):
+                    continue
+                if target[8:-1] in inodes:
+                    return PortHolder(pid=pid, port=port, name=_proc_comm(pid),
+                                      cmdline=_proc_cmdline(pid),
+                                      rss=_proc_rss_bytes(pid),
+                                      uptime=_proc_uptime_seconds(pid))
+        except (OSError, PermissionError):
+            continue
+    return None
+
+
+def _proc_cmdline(pid: int) -> str:
+    """完整命令行（截断），用来在确认框里让用户看清"要杀的是哪个进程"。"""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return ""
+    parts = [c.decode("utf-8", "replace") for c in raw.split(b"\0") if c]
+    text = " ".join(parts)
+    return text if len(text) <= 200 else text[:197] + "…"
+
+
+#: 保护名单：这些 pid 杀下去等于把整台机器/整个会话搞崩，宁可不修也不许动。
+_PROTECTED_PIDS = {1}
+for _shell in (os.getpid(), os.getppid()):
+    _PROTECTED_PIDS.add(_shell)
+
+
+def process_ancestry(pid: int | None = None) -> list[int]:
+    """从自己往上数的一串 pid（含自己），最多 40 层。"""
+    chain: list[int] = []
+    cur = pid or os.getpid()
+    for _ in range(40):
+        if cur <= 1:
+            break
+        chain.append(cur)
+        try:
+            stat = Path(f"/proc/{cur}/stat").read_text(encoding="utf-8", errors="replace")
+            cur = int(stat[stat.rindex(")") + 2:].split()[1])    # 第 4 个字段 = ppid
+        except (OSError, ValueError, IndexError):
+            break
+    return chain
+
+
+def is_ancestor(pid: int) -> bool:
+    """这个进程是我（控制台）的**祖**进程吗（不含我自己）。
+
+    ⚠️ 这条判断是**保命**用的：用户常常是"在 harness 的对话框里让 AI 打开控制台"，
+    于是控制台就跑在 harness 的进程树里。这时一刀切下去，控制台自己也跟着死——
+    必须换成"交给 systemd 延迟动手"（见 :func:`_schedule_detached_kill`）。
+    """
+    if pid <= 0:
+        return False
+    return pid in process_ancestry()[1:]      # [0] 是自己，祖先从 [1] 开始
+
+
+def _schedule_detached_kill(pid: int, port: int, unit: str = UNIT) -> str:
+    """延迟杀 + 重启，交给 systemd 跑——控制台自己被杀掉也不影响它。
+
+    控制台与那个实例同属一个进程树时只能这么干：先让脚本活着退出控制台的视线，
+    几秒后再动手，然后 ``systemctl --user restart`` 把服务拉回来。
+    """
+    import tempfile
+
+    script = (
+        "#!/bin/sh\n"
+        "sleep 3\n"
+        f"kill -TERM {pid} 2>/dev/null\n"
+        "sleep 4\n"
+        f"kill -KILL {pid} 2>/dev/null\n"
+        "sleep 1\n"
+        f"systemctl --user reset-failed {unit} 2>/dev/null\n"
+        f"systemctl --user restart {unit} 2>/dev/null\n"
+    )
+    fd, path = tempfile.mkstemp(prefix="dsh-port-fix-", suffix=".sh")
+    os.close(fd)
+    os.chmod(path, 0o755)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(script)
+        # --collect: 跑完自动回收；没有 systemd-run 就退回 setsid
+        proc = _run(["systemd-run", "--user", "--collect", "--quiet",
+                     f"--unit=dsh-port-fix-{pid}", "/bin/sh", path], timeout=20)
+        if proc.returncode == 0:
+            return f"已交给 systemd 延迟处理（单元 dsh-port-fix-{pid}）"
+    except ServiceError:
+        pass
+    try:
+        subproc.popen(["/bin/sh", path], stdin=subprocess.DEVNULL,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                      start_new_session=True)
+        return "已交给后台脚本延迟处理"
+    except OSError as exc:
+        raise ServiceError(f"无法安排延迟清理：{exc}") from exc
+
+
+def _cgroup_of(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _unit_of_slice(pid: int) -> str:
+    """进程所在 cgroup 里的用户单元名（``…/app.slice/dsh-web.service`` → ``dsh-web``）。"""
+    match = re.search(r"/([A-Za-z0-9_.@-]+)\.service\b", _cgroup_of(pid))
+    return match.group(1) if match else ""
+
+
+def _graceful_kill(pid: int, *, name: str = "", timeout: float = 8.0) -> str:
+    """TERM → 等 → KILL。返回做了什么（给界面显示）。
+
+    为什么先 TERM：harness 干净退出时才会把浏览器插件的 cookies/storage 落盘，
+    上来就 SIGKILL 会把用户从所有网站登出（README 的"安全与注意事项"里写着这条）。
+    """
+    if pid <= 0:
+        return "没有要结束的进程"
+    if pid in _PROTECTED_PIDS:
+        raise ServiceError(f"拒绝操作受保护的进程 PID {pid}（控制台自己或 init）")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return f"PID {pid} 已经退出"
+    except PermissionError as exc:
+        raise ServiceError(f"没有权限结束 PID {pid}（属于别的用户）") from exc
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not pid_alive(pid):
+            return f"已结束 PID {pid}（TERM 优雅退出{('，' + name) if name else ''}）"
+        time.sleep(0.2)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    time.sleep(0.4)
+    if pid_alive(pid):
+        raise ServiceError(f"PID {pid} 发了 TERM 和 KILL 都还在（可能是 D 状态或别的用户）")
+    return f"已强制结束 PID {pid}（TERM 超时后用了 KILL）"
+
+
+def _kill_xvfb_orphans() -> str:
+    """顺手清掉无主的 Xvfb。
+
+    显示器服务被硬杀时会留下 Xvfb：它占着 X 显示号和 lock 文件，下次启动显示器
+    服务就会失败。只杀"没有任何子进程"的 Xvfb——正在服务某个会话的那些不动。
+    """
+    killed = 0
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if _proc_comm(pid) != "Xvfb":
+            continue
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+            ppid = int(stat[stat.rindex(")") + 2:].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        if ppid in (1, 0):                     # 被 init 收养 = 原来的主子没了
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed += 1
+            except OSError:
+                pass
+    return f"清理了 {killed} 个无主 Xvfb" if killed else ""
+
+
+def _start_display_service() -> str:
+    """把显示器服务拉回来（顺手清掉陈旧的显示目录）。
+
+    端口修复完通常要重启 harness，而 harness 里的浏览器插件依赖显示器服务；
+    这里一次做到底，省得用户再点一次。
+    """
+    from . import display
+
+    display.reset_stale()
+    if display.running_port() is not None:
+        return "显示器服务已在运行"
+    try:
+        return display.ensure()
+    except Exception as exc:  # noqa: BLE001 - 显示器起不来不该让端口修复失败
+        return f"显示器服务未能拉起：{exc}"
+
+
+def force_free_port(port: int | None = None, unit: str = UNIT,
+                    *, restart: bool = True) -> "PortFixReport":
+    """**强制**把 harness 端口上占着的东西清掉，然后把服务拉起来。
+
+    这就是"够猛"的那个按钮：不管端口上坐着的是手工敲的 ``dsh web``、被包管理器
+    删了文件却还在跑的僵尸实例，还是上次崩溃留下的孤儿，一律按
+    「先 TERM 后 KILL」结束掉，清理失败状态，重启单元，最后**实测**端口是否真的空出来。
+
+    唯一不动手的情况：那个进程是控制台自己的祖先（控制台就跑在它的进程树里）——
+    这时改成交给 systemd 延迟执行，否则一刀下去控制台先死。
+
+    ``restart=False`` 只做"清端口"这一段，不碰 systemd —— 给自动化测试用：
+    真正的修复一定会重启服务，而重启服务会把测试环境里的东西一起带走。
+    """
+    if port is None:
+        st = get_status_cached(unit=unit)
+        port = st.port or DEFAULT_PORT
+    rep = PortFixReport(port=port, target_port=port)
+    me = os.getpid()
+
+    # 1) 端口上到底坐着谁
+    holder = port_holder(port)
+    if holder is None:
+        rep.actions.append(f"端口 {port} 本来就没被占用")
+    elif holder.pid == me:
+        rep.actions.append("端口是控制台自己占的，跳过")
+        holder = None
+    else:
+        rep.holder = holder
+        rep.actions.append(
+            f"端口 {port} 被 PID {holder.pid}（{holder.name or '未知进程'}）占用"
+            + (f"：{holder.cmdline[:120]}" if holder.cmdline else "")
+        )
+        # systemd 自己管的进程先走优雅停止：SIGKILL 会让浏览器登录态丢
+        owner_unit = _unit_of_slice(holder.pid)
+        if owner_unit == unit:
+            rep.actions.append(f"该进程由 {unit}.service 托管，先 systemctl stop")
+            _act("stop", unit)
+        if is_ancestor(holder.pid):
+            rep.actions.append("⚠️ 它是控制台的祖先进程（控制台跑在它的进程树里），"
+                               "改由 systemd 延迟清理，避免把控制台一起带走")
+            rep.actions.append(_schedule_detached_kill(holder.pid, port, unit))
+            rep.deferred = True
+            rep.actions.append(_start_display_service())
+            return rep
+        rep.actions.append(_graceful_kill(holder.pid, name=holder.name))
+
+    # 2) 没清掉就说明还占着——再确认一次，并把原因写清楚
+    if not port_is_free(port):
+        again = port_holder(port)
+        if again is not None and again.pid != me:
+            if holder is not None and again.pid == holder.pid:
+                raise ServiceError(
+                    f"PID {again.pid} 发了 TERM 和 KILL 都没退，端口 {port} 仍被占用"
+                )
+            rep.actions.append(f"端口仍被 PID {again.pid}（{again.name or '未知进程'}）占着，继续处理")
+            rep.actions.append(_graceful_kill(again.pid, name=again.name))
+
+    # 3) 失败状态清掉，单元拉起来
+    if restart:
+        st = get_status(unit=unit)
+        if st.is_failed:
+            reset_failed(unit)
+            rep.actions.append("已清除 systemd 的失败状态")
+        try:
+            if st.unit_running:
+                _act("restart", unit)
+                rep.actions.append(f"已重启 {unit}.service")
+            else:
+                _act("start", unit)
+                rep.actions.append(f"已启动 {unit}.service")
+            rep.restarted = True
+        except ServiceError as exc:
+            rep.actions.append(f"启动 {unit}.service 失败：{exc}")
+
+        # 4) 显示器服务（内置浏览器的画布靠它）
+        rep.actions.append(_start_display_service())
+        rep.actions.append(_kill_xvfb_orphans())
+
+    # 5) 实测：端口真的空了吗、服务真的起来了吗
+    rep.free = port_is_free(port)
+    rep.url = wait_for_url(unit, attempts=25, delay=0.8) if rep.restarted else None
+    st = get_status(unit=unit)
+    rep.pid = st.effective_pid
+    rep.port = st.port or port
+    if rep.free and not st.is_running:
+        rep.actions.append("端口已空，但服务还没起来（看日志页找原因）")
+    return rep
+
+
+def _listen_inodes(port: int) -> set[str]:
+    """端口对应的监听 socket inode 集合。
+
+    ``/proc/net/tcp`` 每行形如::
+
+        sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
+        0:  0100007F:0C08 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 123456 1 …
+
+    ``st`` 为 ``0A`` 是 LISTEN；本地地址与端口的十六进制按**小端**存（3080 → ``0C08``）。
+    inode 那一列就是 :func:`port_holder` 拿去和 ``/proc/<pid>/fd`` 对暗号的键。
+    """
+    inodes: set[str] = set()
+    for name in ("tcp", "tcp6"):
+        try:
+            lines = Path(f"/proc/net/{name}").read_text(
+                encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) < 10:
+                continue
+            local = parts[1]
+            _, _, port_hex = local.partition(":")
+            if parts[3] != "0A":                       # 只看 LISTEN
+                continue
+            try:
+                if int(port_hex, 16) != port:
+                    continue
+            except ValueError:
+                continue
+            inodes.add(parts[9])
+    return inodes
+
+
 def _proc_comm(pid: int) -> str:
     """进程名。``ss`` 给的是线程名（``node-MainThread``），这里换成 argv[0] 更好认。"""
     if pid <= 0:
@@ -515,8 +954,25 @@ def use_child_backend(source: str | None = None) -> bool:
     return (source or _harness.current_source()) == _harness.SOURCE_BUNDLED
 
 
+def _is_zombie(pid: int) -> bool:
+    """是不是已经结束、只是还没被父进程回收（``<defunct>``）。
+
+    **僵尸进程必须当成"已经死了"**：它的信号已经杀不动了（``os.kill`` 返回成功但
+    什么也不会发生），而 ``os.kill(pid, 0)`` 依然报告"进程存在" —— 只看后者会把
+    "已经杀掉的进程"误判成"杀不掉"，于是自动修复白等 8 秒再报一个假的失败。
+    僵尸不占端口、不占内存，除了 pid 什么都没剩下。
+    """
+    if pid <= 0:
+        return False
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        return stat[stat.rindex(")") + 2:].split()[0] == "Z"
+    except (OSError, ValueError, IndexError):
+        return False
+
+
 def pid_alive(pid: int) -> bool:
-    """进程还活着吗。
+    """进程还活着吗（僵尸算"已结束"，见 :func:`_is_zombie`）。
 
     ⚠️ **Windows 上绝对不能用 ``os.kill(pid, 0)`` 探测**：POSIX 里信号 0 是"只检查
     不发信号"，但 Windows 的 ``os.kill`` 是 ``OpenProcess`` + ``TerminateProcess``，
@@ -532,6 +988,8 @@ def pid_alive(pid: int) -> bool:
         except (OSError, subprocess.SubprocessError):
             return False
         return str(pid) in (out.stdout or "")
+    if _is_zombie(pid):
+        return False
     try:
         os.kill(pid, 0)          # 只探测存在性，不真的发信号
     except ProcessLookupError:

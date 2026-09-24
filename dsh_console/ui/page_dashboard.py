@@ -128,13 +128,25 @@ class DashboardPage(ScrollPage):
         self.btn_restart = QPushButton("重启")
         self.btn_stop = QPushButton("停止")
         self.btn_stop.setObjectName("Danger")
+        # 「强制修复端口」：专门对付「harness 活着但不由单元托管」——
+        # 端口被别的实例占着，systemctl 的启停全都不管事。这是唯一能把局面收回来的按钮，
+        # 所以给它独立的醒目样式（warn 色，不是普通的 Danger 红：它杀的是**别人的**进程）。
+        self.btn_forcefix = QPushButton("强制修复端口占用")
+        self.btn_forcefix.setObjectName("ForceFix")
+        self.btn_forcefix.setToolTip(
+            "端口被占住、harness 起不来也停不掉时用这个。\n"
+            "会先找出占着端口的进程，TERM 优雅退出（等 8 秒），不退就 KILL；\n"
+            "再清 systemd 失败状态、重启服务、顺手把显示器服务和孤儿 Xvfb 收拾干净。\n"
+            "⚠️ 这会结束别的进程，正在进行的会话会断开。"
+        )
         self.btn_open = QPushButton("内置浏览器打开界面")
         # 内置浏览器是默认动作 → 高亮（用户要求）
         self.btn_open.setObjectName("Primary")
         self.btn_url = QPushButton("复制访问地址")
         self.btn_url.setObjectName("Ghost")
 
-        for b in (self.btn_restart, self.btn_stop, self.btn_open, self.btn_url):
+        for b in (self.btn_restart, self.btn_stop, self.btn_forcefix,
+                  self.btn_open, self.btn_url):
             buttons.addWidget(b)
         buttons.addStretch(1)
         status_card.body.addLayout(buttons)
@@ -226,6 +238,7 @@ class DashboardPage(ScrollPage):
 
         self.btn_stop.clicked.connect(lambda: self._act("stop"))
         self.btn_restart.clicked.connect(lambda: self._act("restart"))
+        self.btn_forcefix.clicked.connect(self._force_fix_port)
         # 打开界面走**内置浏览器**（随包携带，不依赖系统里装没装浏览器）
         self.btn_open.clicked.connect(self._open_in_browser)
         self.btn_url.clicked.connect(self._copy_url)
@@ -331,10 +344,11 @@ class DashboardPage(ScrollPage):
                 f"⚠️ harness 正在运行，但<b>不是</b> dsh-web.service 拉起来的"
                 f"（PID {st.listener_pid}，进程 {owner}{port_part}）。"
                 f"「启动 / 重启」会因端口被占而失败，「停止」也停不掉它——"
-                f"要接管得先在启动它的那个终端里结束进程。"
-                f"带 token 的地址只打印在它自己的终端里，这里取不到，「打开界面」因此不可用。"
+                f"点「<b>强制修复端口占用</b>」可以结束它并把服务接管回来"
+                f"（会断开它正在进行的会话）。带 token 的地址只打印在它自己的终端里，"
+                f"这里取不到，「打开界面」因此不可用。"
             )
-            tip = "该实例不由 systemd 托管，systemctl 动不了它"
+            tip = "该实例不由 systemd 托管，systemctl 动不了它；用「强制修复端口占用」接管"
         else:
             tip = ""
         self.status_note.setVisible(foreign)
@@ -378,7 +392,8 @@ class DashboardPage(ScrollPage):
     # ------------------------------------------------------------ 动作
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
-        for b in (self.btn_stop, self.btn_restart, self.btn_open, self.btn_url):
+        for b in (self.btn_stop, self.btn_restart, self.btn_forcefix,
+                  self.btn_open, self.btn_url):
             b.setEnabled(not busy)
         if not busy and self._last is not None:
             self._on_status(self._last)
@@ -420,6 +435,84 @@ class DashboardPage(ScrollPage):
         def fail(msg: str) -> None:
             self._set_busy(False)
             self.error_label.setText(f"{label}失败：{msg}")
+
+        run_async(job, done, fail)
+
+    # -------------------------------------------------------- 强制修复端口
+    def _port_in_question(self) -> int:
+        """这次要抢的是哪个端口：优先当前实测到的，其次默认 3080。"""
+        if self._last is not None and self._last.port:
+            return int(self._last.port)
+        return service.DEFAULT_PORT
+
+    def _force_fix_port(self) -> None:
+        """强制修复端口占用 —— 结束占用者、清失败状态、重启服务、实测结果。
+
+        **必须先确认**：它会结束别的进程（可能是用户自己开的会话），一刀切下去
+        正在进行的对话就断了。对话框里把"要杀谁"写清楚，用户才有判断依据。
+        """
+        if self._busy:
+            return
+        st = self._last
+        port = self._port_in_question()
+        if st is not None and st.listener_pid and st.foreign_running:
+            who = (f"PID {st.listener_pid}（{st.listener_name or '未知进程'}）"
+                   f"，占用端口 {st.port or port}")
+            why = "它不由 systemd 托管，「启动 / 重启 / 停止」对它都没用。"
+        elif st is not None and st.unit_running:
+            who = f"{service.UNIT}.service（PID {st.effective_pid}，端口 {st.port or port}）"
+            why = "端口被占着，服务起不来或行为异常。"
+        else:
+            who = f"占用端口 {port} 的进程"
+            why = "harness 没能正常监听该端口。"
+        ans = QMessageBox.warning(
+            self,
+            "强制修复端口占用",
+            f"即将强制清掉：{who}\n{why}\n\n"
+            "会依次执行：\n"
+            "  1. 结束占用端口的进程（先 TERM 等 8 秒，不退就 KILL）\n"
+            "  2. 清除 systemd 失败状态，重启/启动 dsh-web.service\n"
+            "  3. 拉起显示器服务，清理无主的 Xvfb\n\n"
+            # ⚠️ QMessageBox 的正文是**纯文本**：这里写 markdown 的 ** 会原样显示成星号
+            # （实测），要强调就用「」和 ⚠️。
+            "⚠️ 占用者正在处理的会话会被立刻断开（浏览器登录态会在干净退出时保存）。\n"
+            "确定要强制修复吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            return
+
+        self._set_busy(True)
+        self.error_label.setText("正在强制修复端口占用…")
+        self._front_hint(f"正在抢占端口 {port}…")
+        force_port = port
+
+        def job():
+            rep = service.force_free_port(force_port)
+            # 修复过程会杀掉旧实例，已读过的状态快照全部作废
+            service.invalidate_status()
+            return rep
+
+        def done(rep) -> None:
+            self._set_busy(False)
+            self.error_label.setText("")
+            self.refresh()
+            lines = rep.actions if rep.actions else ["（没有需要处理的步骤）"]
+            body = "\n".join(f"· {a}" for a in lines)
+            tail = f"\n\n结果：{rep.summary()}"
+            if rep.url:
+                tail += f"\n带 token 的地址：{rep.url}"
+            elif rep.pid:
+                tail += f"\nharness PID：{rep.pid}"
+            box = QMessageBox.information if rep.ok else QMessageBox.warning
+            box(self, "强制修复端口占用", f"{body}{tail}")
+
+        def fail(msg: str) -> None:
+            self._set_busy(False)
+            self.error_label.setText(f"强制修复失败：{msg}")
+            QMessageBox.critical(self, "强制修复端口占用",
+                                 f"强制修复失败：\n{msg}\n\n日志页有 dsh-web 的完整输出。")
 
         run_async(job, done, fail)
 

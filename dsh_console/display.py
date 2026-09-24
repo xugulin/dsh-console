@@ -51,6 +51,54 @@ def viewer_script() -> Path | None:
     return None
 
 
+def cache_dir() -> Path:
+    """显示器服务的状态目录（token、端口、各会话的 Xvfb 信息）。"""
+    import os
+
+    base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+    return base / "dsh-display"
+
+
+def reset_stale() -> str:
+    """清掉显示器服务上次留下的陈旧状态，返回做了什么（可能为空串）。
+
+    要清的原因是**硬杀**：服务被 KILL 掉时来不及回收自己拉起来的 Xvfb，端口和
+    lock 文件就留在 ``/tmp/.X11-unix``、``/tmp/.X<n>-lock`` 里；下次启动会因为
+    "显示号已被占用"而失败，表现成"显示器面板一直是黑的"。这里只删**没有活进程
+    在听**的端口记录，正在跑的服务不受影响。
+    """
+    removed: list[str] = []
+    port_file = cache_dir() / "port"
+    if port_file.is_file():
+        try:
+            recorded = int(port_file.read_text(encoding="utf-8").strip() or 0)
+        except (OSError, ValueError):
+            recorded = 0
+        # 记录里的端口没人听 → 那是上一次运行的残迹，删掉让服务重新挑
+        if recorded and running_port() != recorded:
+            try:
+                port_file.unlink()
+                removed.append(f"清掉陈旧端口记录 {recorded}")
+            except OSError:
+                pass
+    locks = 0
+    for lock in Path("/tmp").glob(".X*-lock"):
+        try:
+            pid = int(lock.read_text(encoding="utf-8", errors="replace").strip() or 0)
+        except (OSError, ValueError):
+            pid = 0
+        # lock 文件里第一行是持有它的 X 服务 pid；进程没了就是死锁文件
+        if pid and not Path(f"/proc/{pid}").exists():
+            try:
+                lock.unlink()
+                locks += 1
+            except OSError:
+                pass
+    if locks:
+        removed.append(f"清掉 {locks} 个陈旧的 X lock 文件")
+    return "；".join(removed)
+
+
 def _start_via_systemd() -> bool:
     """优先走 systemd 用户单元（Linux）。单元不存在时返回 False。"""
     if sys.platform == "win32":

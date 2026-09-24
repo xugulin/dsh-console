@@ -1704,6 +1704,59 @@ wine cmd /c "Start-DSH-Web-UI.bat"                  # 起 web，再从 Linux cur
     "先跑 补装Windows运行时.bat"——**那个脚本根本不存在**。凡是文档里承诺了一个
     文件名/命令，就要同时确认它真的会被生成；否则用户照着做只会撞墙。
 
+## 踩过的坑 · 强制修复端口占用
+
+这一节记的是"包管理器把 harness 的文件删了、进程还在跑"那类死局，以及那个琥珀色
+按钮背后的每一条判断。**改这段代码之前请先读完**，里面有几处是保命的。
+
+1. **文件没了 ≠ 进程没了，这正是死局的来源。**
+   `pacman -Rns deepseek-harness-bin` 删掉了 28749 个文件，`dsh` 命令当场消失
+   （`dsh: 未找到命令`），可**进程还在跑、端口还占着**。这时：新装的 harness 起不来
+   （EADDRINUSE）、`systemctl stop` 停不掉它（它不归单元管）、控制台状态页只能说
+   "harness 在跑但不归 dsh-web.service 管"。用户手里**没有任何**可用手段。
+   更麻烦的是这个进程是**控制台的祖先进程**（用户常常就是"在 harness 的对话框里让
+   AI 打开控制台"），一刀切下去控制台自己也死。
+
+   所以 `force_free_port()` 里那条祖先判断（`is_ancestor`）不是可选的优化：
+   命中就改走 `systemd-run --user --collect` 起一个延迟脚本（sleep 3 → TERM →
+   sleep 4 → KILL → 重启单元），让动手的人活到动手之后。
+
+2. **`pacman -Rns` 的 `-s` 会连坐。**
+   `-s`（`--recursive`）会把"只被这个包需要"的依赖一起删——实测把 **`pnpm`** 也带走了，
+   而 pnpm 是 harness 拉 profile 依赖用的。表现是"包卸干净了，harness 却起不来"。
+   要动系统包时先 `pacman -Rns --print` 把清单打出来看一眼，或者干脆不用 `-s`。
+
+3. **僵尸进程必须当成"已经死了"。**
+   `os.kill(pid, 0)` 对僵尸（`<defunct>`）返回成功——它"存在"，但已经收不到信号了。
+   只看这个判据，会把"已经杀掉的进程"误判成"杀不掉"，于是白等 8 秒再报一个假失败
+   （实测：测试里的假 harness 是被测试自己 `kill` 掉的，正好变成僵尸）。
+   Linux 上要读 `/proc/<pid>/stat` 看状态字段是不是 `Z`。
+
+4. **找端口的主人不能只靠一条路。**
+   `/proc/net/tcp` 拿 inode 再扫 `/proc/<pid>/fd` 反查 pid：不用特权、能查到自己的
+   进程，在 Linux 上最准（`ss -ltnp` 看别人的 pid 要 root，`fuser` 同理）。
+   但**macOS 没有 `/proc`**，而 CI 恰恰跑在 macOS 上。所以 `port_holder()` 必须
+   带 `lsof -nP -iTCP:<port> -sTCP:LISTEN` 这条兜底——lsof 两个平台都有，
+   在 macOS 上还能看到任意进程的 pid。
+
+5. **测试要能把"杀进程"这段真跑一遍，又不能碰用户的 harness。**
+   `force_free_port(port, restart=False)` 这个参数就是为它留的：真起一个假 harness
+   （只 `listen`）、真发信号、真验证端口空出来，但**不碰 systemd**——真修复一定要
+   重启服务，而重启服务会把测试环境一起带走。见 `tools/ci_portfix_test.py`
+   （23 项，含"TERM 不退就走 KILL"的顽固进程用例）。
+
+6. **QMessageBox 的正文是纯文本，markdown 会原样显示。**
+   确认框里写"会被**立刻断开**"，用户看到的就是带星号的字面量。QLabel 会认 HTML，
+   但 QMessageBox 不会：要强调就用「」和 ⚠️。（同一个坑在 `status_note` 那边是反的——
+   那里是 QLabel，必须写 HTML。）
+
+7. **孤立页面的截图会骗人。**
+   本项目 QSS 是**应用级**的（`MainWindow.apply_theme` → `app.setStyleSheet`）。
+   孤立构造一个页面再 `grab()`，拿到的是没有任何样式的原生控件——那个"按钮怎么是灰的"
+   的截图差点让我去改一个根本没坏的样式规则。现在 `tools/ci_gui_smoke.py` 里先
+   `app.setStyleSheet(build_qss(theme))`，再**按像素**验证按钮底色等于主题的 `warn`
+   （实测 `rgb(245,185,59)` 与 `#f5b93b` 完全一致）。
+
 ## 开发
 
 下面统一用 `$PY` 指代本项目的解释器，省得每次敲全路径：

@@ -75,7 +75,7 @@ agent，只把它管起来；界面用 **Python + PySide6（Qt 6）** 写；页�
 
 | 页面 | 内容 |
 |---|---|
-| **控制台** | 服务状态与启停重启、用**内置 Chromium 浏览器**打开界面 / 复制地址、启动前端、今日消费 + 余额 + 24 小时柱状图 |
+| **控制台** | 服务状态与启停重启、**强制修复端口占用**（一键收拾抢端口的进程）、用**内置 Chromium 浏览器**打开界面 / 复制地址、启动前端、今日消费 + 余额 + 24 小时柱状图 |
 | **Harness** | 版本与升级（`latest` / `next` / `alpha`）、安装详情、运行状态、Profile 与插件 bundle |
 | **模型与价格** | 当前峰谷档位与切换倒计时、实时价目表、¥ / $ 切换、从官方 API 同步 |
 | **账单** | 账户余额、会话花费汇总、按花费排序的会话明细 |
@@ -118,6 +118,9 @@ python main.py                       # Windows / 其他平台
 
 **停止服务会不会弄丢我的网页登录态？**
 不会。停止走 `SIGTERM` 并等它自己退；丢登录态的是 `kill -9`，控制台从不这么干。
+
+**端口被占了、harness 起不来也停不掉，怎么办？**
+点控制台页的 **「强制修复端口占用」**（琥珀色那个按钮）。它会：找出占着端口的进程 → 先 `TERM` 等 8 秒、不退再 `KILL` → 清掉 systemd 失败状态 → 重启 `dsh-web.service` → 顺手拉起显示器服务并清理无主 Xvfb，最后**实测**端口是否真空出来、把带 token 的地址交给你。典型场景是 harness 的文件被包管理器删了、进程却还在跑（`dsh: 未找到命令`，端口仍被占着）——systemctl 对那种进程完全无能为力，只有这个按钮收得回来。点之前会弹确认框，把"要杀谁"（PID、进程名、命令行）写清楚再动手。
 
 **支持哪些平台？**
 Linux 和 Windows，各一个 zip（harness 的原生模块是平台专属的）。
@@ -211,6 +214,9 @@ No. In portable mode the harness is a child process of the console — the PID g
 
 **Will stopping it break my browser logins?**
 No. Stop uses `SIGTERM` and waits for a clean exit — a `kill -9` is what loses the browser plugin's cookies, and the console never does that.
+
+**A process is squatting on the port and the harness can neither start nor stop — now what?**
+Press **"Force-fix port conflict"** (the amber button on the Dashboard). It finds the process holding the port → sends `TERM` and waits 8 s, then `KILL` → clears the systemd failed state → restarts `dsh-web.service` → brings the display service back and sweeps orphaned Xvfb processes, then **verifies** that the port really is free and hands you the token-bearing URL. The classic case is a harness whose files were removed by a package manager while the process kept running (`dsh: command not found`, port still held): `systemctl` is powerless there, and this is the only button that takes it back. It asks for confirmation first and spells out exactly who it is about to end (PID, process name, command line).
 
 **Windows and Linux?**
 Both, as separate zips (native modules in the harness are platform-specific).
